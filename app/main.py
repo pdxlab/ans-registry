@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlmodel import Session, select
 
+from .admin import router as admin_router
 from .database import create_db, get_session
 from .models import Agent, Transfer, LookupLog
 from .verification import (
@@ -46,6 +47,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+app.include_router(admin_router)
 
 @app.on_event("startup")
 def on_startup():
