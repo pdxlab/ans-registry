@@ -12,10 +12,11 @@ Shows:
 """
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select, func
 from .database import get_session
 from .models import Agent, Transfer, LookupLog
+from .auth import get_current_admin, AdminUser, SESSION_COOKIE
 
 router = APIRouter()
 
@@ -29,6 +30,7 @@ def admin_html(content: str, active_tab: str = "overview") -> str:
         ("transfers", "Transfers", "/admin/transfers"),
         ("rankings", "Public Rankings", "/admin/rankings"),
         ("outreach", "GTM Outreach", "/admin/outreach"),
+        ("users", "Admin Users", "/admin/users"),
     ]
 
     tab_html = ""
@@ -78,7 +80,8 @@ def admin_html(content: str, active_tab: str = "overview") -> str:
     </div>
     <div style="display:flex;gap:8px;">
       <a href="/docs" class="btn btn-outline" target="_blank">API Docs</a>
-      <a href="https://trustmodel.ai/ans" class="btn btn-primary" target="_blank">Public Page</a>
+      <a href="https://trustmodel.ai/ans" class="btn btn-outline" target="_blank">Public Page</a>
+      <a href="/admin/logout" class="btn btn-outline" style="color:#ef4444;border-color:#fecaca;">Logout</a>
     </div>
   </div>
   <div class="tabs">{tab_html}</div>
@@ -88,8 +91,12 @@ def admin_html(content: str, active_tab: str = "overview") -> str:
 
 
 @router.get("/admin", response_class=HTMLResponse)
-def admin_overview(session: Session = Depends(get_session)):
+def admin_overview(request: Request, session: Session = Depends(get_session)):
     """Admin overview dashboard."""
+
+    admin = get_current_admin(request, session)
+    if not admin:
+        return RedirectResponse("/admin/login")
 
     agents = session.exec(select(Agent)).all()
     transfers = session.exec(select(Transfer)).all()
@@ -142,8 +149,11 @@ def admin_overview(session: Session = Depends(get_session)):
 
 
 @router.get("/admin/agents", response_class=HTMLResponse)
-def admin_agents(session: Session = Depends(get_session)):
+def admin_agents(request: Request, session: Session = Depends(get_session)):
     """All registered agents with edit/remove actions."""
+    admin = get_current_admin(request, session)
+    if not admin:
+        return RedirectResponse("/admin/login")
 
     agents = session.exec(select(Agent).order_by(Agent.registered_at.desc())).all()
 
@@ -182,8 +192,11 @@ def admin_agents(session: Session = Depends(get_session)):
 
 
 @router.get("/admin/transfers", response_class=HTMLResponse)
-def admin_transfers(session: Session = Depends(get_session)):
+def admin_transfers(request: Request, session: Session = Depends(get_session)):
     """Ownership transfer history."""
+    admin = get_current_admin(request, session)
+    if not admin:
+        return RedirectResponse("/admin/login")
 
     transfers = session.exec(select(Transfer).order_by(Transfer.initiated_at.desc())).all()
 
@@ -214,8 +227,11 @@ def admin_transfers(session: Session = Depends(get_session)):
 
 
 @router.get("/admin/rankings", response_class=HTMLResponse)
-def admin_rankings(session: Session = Depends(get_session)):
+def admin_rankings(request: Request, session: Session = Depends(get_session)):
     """Public TrustScore rankings across all categories."""
+    admin = get_current_admin(request, session)
+    if not admin:
+        return RedirectResponse("/admin/login")
 
     content = """
     <div class="card">
@@ -264,8 +280,11 @@ def admin_rankings(session: Session = Depends(get_session)):
 
 
 @router.get("/admin/outreach", response_class=HTMLResponse)
-def admin_outreach():
+def admin_outreach(request: Request, session: Session = Depends(get_session)):
     """GTM outreach tracking."""
+    admin = get_current_admin(request, session)
+    if not admin:
+        return RedirectResponse("/admin/login")
 
     content = """
     <div class="card">
