@@ -24,7 +24,9 @@ from pydantic import BaseModel, EmailStr
 from sqlmodel import Session, select
 
 from .admin import router as admin_router
-from .database import create_db, get_session
+from .admin_auth import router as auth_router
+from .auth import seed_superadmin, AdminUser
+from .database import create_db, get_session, engine
 from .models import Agent, Transfer, LookupLog
 from .verification import (
     generate_verification_token,
@@ -49,10 +51,15 @@ app.add_middleware(
 
 
 app.include_router(admin_router)
+app.include_router(auth_router)
 
 @app.on_event("startup")
 def on_startup():
     create_db()
+    # Seed Karl as superadmin on first startup
+    from sqlmodel import Session
+    with Session(engine) as session:
+        seed_superadmin(session)
 
 
 # ── Request/Response Models ──
