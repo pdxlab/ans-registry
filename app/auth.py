@@ -123,13 +123,16 @@ def require_superadmin(request: Request, session: Session = Depends(get_session)
 
 def seed_superadmin(session: Session):
     """Create Karl's superadmin account if it doesn't exist."""
-    existing = session.exec(select(AdminUser).where(AdminUser.email == "km@xspan.ai")).first()
+    existing = session.exec(select(AdminUser).where(AdminUser.email == "knm@predixtions.com")).first()
     if not existing:
         salt = secrets.token_hex(16)
-        # Default password — Karl should change on first login
-        default_pw = os.environ.get("ANS_ADMIN_PASSWORD", "TrustModel2026!")
+        default_pw = os.environ.get("ANS_ADMIN_PASSWORD")
+        if not default_pw:
+            print("[ANS] WARNING: Set ANS_ADMIN_PASSWORD env var before first startup.")
+            print("[ANS] Superadmin account NOT created. Set the env var and restart.")
+            return
         admin = AdminUser(
-            email="km@xspan.ai",
+            email="knm@predixtions.com",
             name="Karl Mehta",
             password_hash=hash_password(default_pw, salt),
             salt=salt,
