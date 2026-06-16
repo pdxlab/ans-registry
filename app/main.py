@@ -4,9 +4,14 @@ ANS Registry — Agent Naming Service API
 DNS + SSL for AI Agents.
 
 Endpoints:
-  POST /ans/register         — Register a new agent
+  POST /ans/register         — Register a new agent (with org/domain assurance)
   GET  /ans/lookup/{name}    — Look up an agent (WHOIS for agents)
+  GET  /ans/whois/{name}     — WHOIS-for-agents record (owner/tier/cert status)
   POST /ans/verify           — Verify ownership via DNS or email
+  POST /ans/verify/org       — Org-validate (OV tier) — admin only
+  POST /ans/a2a/verify       — Agent-to-agent verification
+  GET  /ans/typosquats/{name}— Typosquat candidates targeting a name
+  GET  /ans/orphans          — Orphaned / orphan-risk names
   POST /ans/transfer         — Initiate ownership transfer
   POST /ans/transfer/accept  — Accept a transfer
   GET  /ans/search           — Search agents
@@ -25,14 +30,21 @@ from sqlmodel import Session, select
 
 from .admin import router as admin_router
 from .admin_auth import router as auth_router
-from .auth import seed_superadmin, AdminUser
+from .auth import seed_superadmin, AdminUser, require_admin
 from .database import create_db, get_session, engine
-from .models import Agent, Transfer, LookupLog
+from .models import Agent, Transfer, LookupLog, A2AVerificationLog
 from .verification import (
     generate_verification_token,
     check_dns_txt,
     verify_email_domain,
     calculate_trust_score,
+)
+from .assurance import (
+    compute_assurance_tier,
+    assess_orphan_risk,
+    find_typosquats,
+    TIER_DV,
+    TIER_OV,
 )
 
 app = FastAPI(
@@ -86,7 +98,19 @@ class RegisterResponse(BaseModel):
     verification_instructions: str
     trust_score: float
     trust_tier: str
+    assurance_tier: str
     status: str
+    typosquat_warning: Optional[str] = None  # set if name resembles a registered one
+
+
+class OrgValidateRequest(BaseModel):
+    ans_name: str
+
+
+class A2AVerifyRequest(BaseModel):
+    target_ans_name: str  # the agent being verified
+    caller_ans_name: str = ""  # the agent making the request (optional)
+    min_assurance: str = "DV"  # "unverified" | "DV" | "OV"
 
 
 class VerifyRequest(BaseModel):
@@ -136,6 +160,17 @@ def register_agent(req: RegisterRequest, session: Session = Depends(get_session)
     if existing:
         raise HTTPException(status_code=409, detail=f"ANS name '{ans_name}' is already registered.")
 
+    # Flag (but don't block) names that resemble existing registered names —
+    # protects established orgs against lookalike squatting at registration time.
+    registered_names = session.exec(select(Agent.ans_name)).all()
+    squat_hits = find_typosquats(ans_name, registered_names)
+    typosquat_warning = None
+    if squat_hits:
+        typosquat_warning = (
+            f"'{ans_name}' closely resembles existing registered name(s): "
+            f"{', '.join(squat_hits)}. Flagged for review."
+        )
+
     # Calculate initial TrustScore
     score, tier = calculate_trust_score(
         req.agent_type, False, req.capabilities, req.source_url, req.description
@@ -156,6 +191,7 @@ def register_agent(req: RegisterRequest, session: Session = Depends(get_session)
         data_access=req.data_access,
         source_url=req.source_url,
         verification_token=token,
+        assurance_tier=compute_assurance_tier(False, "", False),  # unverified at registration
         trust_score=score,
         trust_tier=tier,
         trust_evaluated_at=datetime.utcnow(),
@@ -183,7 +219,9 @@ def register_agent(req: RegisterRequest, session: Session = Depends(get_session)
         verification_instructions=instructions,
         trust_score=score,
         trust_tier=tier,
+        assurance_tier=agent.assurance_tier,
         status="registered",
+        typosquat_warning=typosquat_warning,
     )
 
 
@@ -209,6 +247,7 @@ def lookup_agent(ans_name: str, request: Request, session: Session = Depends(get
         "owner": {
             "organization": agent.owner_org,
             "verified": agent.verified,
+            "assurance_tier": agent.assurance_tier,
             "domain": agent.owner_domain,
             "verification_method": agent.verification_method if agent.verified else None,
             "registered": agent.registered_at.isoformat(),
@@ -230,6 +269,205 @@ def lookup_agent(ans_name: str, request: Request, session: Session = Depends(get
         "orphan_risk": agent.orphan_risk,
         "detailed_eval_url": "https://trustmodel.ai/developers",
     }
+
+
+@app.get("/ans/whois/{ans_name}")
+def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_session)):
+    """
+    WHOIS-for-agents — TRUS-1258.
+
+    A compact, registry-style record resolving an agent name to its owning org,
+    registration date, verification/assurance tier, and AgentCert status.
+    Public, no auth — the agent equivalent of a `whois` query.
+    """
+    ans_name = ans_name.lower().strip()
+    agent = session.exec(select(Agent).where(Agent.ans_name == ans_name)).first()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{ans_name}' not found in ANS registry.")
+
+    # Log the lookup (same analytics stream as /ans/lookup).
+    log = LookupLog(ans_name=ans_name, requester_ip=request.client.host if request.client else "")
+    session.add(log)
+    session.commit()
+
+    # AgentCert status is derived from assurance tier + a current TrustScore cert.
+    has_cert = agent.trust_score is not None and agent.trust_evaluated_at is not None
+    if agent.assurance_tier in (TIER_DV, TIER_OV) and has_cert:
+        agentcert_status = f"certified ({agent.assurance_tier})"
+    elif has_cert:
+        agentcert_status = "scored (unverified)"
+    else:
+        agentcert_status = "none"
+
+    return {
+        "ans_name": agent.ans_name,
+        "ans_id": f"ans://{agent.ans_name}.trustmodel.ai",
+        "display_name": agent.display_name,
+        "registrant_org": agent.owner_org,
+        "registrant_domain": agent.owner_domain,
+        "registrant_email": agent.owner_email,
+        "verified": agent.verified,
+        "assurance_tier": agent.assurance_tier,  # unverified | DV | OV
+        "verification_method": agent.verification_method if agent.verified else None,
+        "registered_at": agent.registered_at.isoformat(),
+        "updated_at": agent.updated_at.isoformat(),
+        "verified_at": agent.verified_at.isoformat() if agent.verified_at else None,
+        "status": agent.status,
+        "orphan_risk": agent.orphan_risk,
+        "agentcert": {
+            "status": agentcert_status,
+            "trust_score": agent.trust_score,
+            "trust_tier": agent.trust_tier,
+            "evaluated_at": agent.trust_evaluated_at.isoformat() if agent.trust_evaluated_at else None,
+            "certificate_url": agent.trust_cert_url,
+        },
+        "registry": "ANS — Agent Naming Service",
+    }
+
+
+@app.post("/ans/a2a/verify")
+def a2a_verify(req: A2AVerifyRequest, request: Request, session: Session = Depends(get_session)):
+    """
+    Agent-to-agent verification — TRUS-1259.
+
+    One agent asks ANS whether another agent is who it claims to be, and
+    whether it meets a minimum assurance bar before connecting. Returns a
+    clear pass/fail plus the target's record and any typosquat warning.
+    """
+    target_name = req.target_ans_name.lower().strip()
+    tier_rank = {"unverified": 0, TIER_DV: 1, TIER_OV: 2}
+    required = tier_rank.get(req.min_assurance, 1)
+
+    agent = session.exec(select(Agent).where(Agent.ans_name == target_name)).first()
+
+    requester_ip = request.client.host if request.client else ""
+
+    if not agent:
+        # Unknown name — surface whether it looks like a squat on a real name,
+        # which is a strong "do not connect" signal for the caller.
+        registered_names = session.exec(select(Agent.ans_name)).all()
+        squat_hits = find_typosquats(target_name, registered_names)
+        result = "typosquat_warning" if squat_hits else "not_found"
+        session.add(A2AVerificationLog(
+            caller_ans_name=req.caller_ans_name.lower().strip(),
+            target_ans_name=target_name,
+            result=result,
+            requester_ip=requester_ip,
+        ))
+        session.commit()
+        return {
+            "verified": False,
+            "result": result,
+            "target_ans_name": target_name,
+            "message": (
+                f"'{target_name}' is not registered but resembles: {', '.join(squat_hits)}. "
+                f"Do not connect."
+                if squat_hits else
+                f"'{target_name}' is not registered in ANS."
+            ),
+            "resembles": squat_hits or None,
+        }
+
+    actual = tier_rank.get(agent.assurance_tier, 0)
+    meets_bar = agent.verified and actual >= required
+    result = "verified" if meets_bar else "unverified"
+
+    session.add(A2AVerificationLog(
+        caller_ans_name=req.caller_ans_name.lower().strip(),
+        target_ans_name=target_name,
+        result=result,
+        requester_ip=requester_ip,
+    ))
+    session.commit()
+
+    return {
+        "verified": meets_bar,
+        "result": result,
+        "target_ans_name": agent.ans_name,
+        "ans_id": f"ans://{agent.ans_name}.trustmodel.ai",
+        "owner_org": agent.owner_org,
+        "owner_domain": agent.owner_domain,
+        "assurance_tier": agent.assurance_tier,
+        "min_assurance": req.min_assurance,
+        "trust_score": agent.trust_score,
+        "trust_tier": agent.trust_tier,
+        "status": agent.status,
+        "message": (
+            f"'{agent.ans_name}' is {agent.assurance_tier}-verified to {agent.owner_org}."
+            if meets_bar else
+            f"'{agent.ans_name}' does not meet the required assurance bar "
+            f"({agent.assurance_tier} < {req.min_assurance})."
+        ),
+    }
+
+
+@app.get("/ans/typosquats/{ans_name}")
+def typosquats_for_name(
+    ans_name: str,
+    max_distance: int = Query(1, ge=1, le=2),
+    session: Session = Depends(get_session),
+):
+    """
+    Typosquat detection — TRUS-1259.
+
+    Return registered names that appear to be squatting on `ans_name` (or that
+    `ans_name` would squat on), via small edit distance or homoglyph swaps.
+    Useful for a brand owner to monitor lookalikes of their agent name.
+    """
+    target = ans_name.lower().strip()
+    registered_names = session.exec(select(Agent.ans_name)).all()
+    # Candidates are every registered name other than the target itself.
+    others = [n for n in registered_names if n != target]
+    hits = find_typosquats(target, others, max_distance=max_distance)
+
+    return {
+        "ans_name": target,
+        "registered": target in registered_names,
+        "max_distance": max_distance,
+        "typosquat_count": len(hits),
+        "typosquats": hits,
+    }
+
+
+@app.get("/ans/orphans")
+def list_orphans(
+    min_risk: str = Query("low", description="low | medium | high"),
+    limit: int = Query(50, ge=1, le=500),
+    session: Session = Depends(get_session),
+):
+    """
+    Orphan detection — TRUS-1259.
+
+    Recompute orphan risk across the namespace and return names at or above
+    `min_risk`. Orphans are names with no proven/active owner — abandoned or
+    never-verified registrations, the agent analog of a lapsed domain.
+    """
+    risk_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+    threshold = risk_rank.get(min_risk, 1)
+
+    agents = session.exec(select(Agent)).all()
+    results = []
+    for a in agents:
+        risk = assess_orphan_risk(a.verified, a.verified_at, a.updated_at)
+        # Persist the freshly-computed risk so lookup/admin stay consistent.
+        if a.orphan_risk != risk:
+            a.orphan_risk = risk
+            session.add(a)
+        if risk_rank.get(risk, 0) >= threshold:
+            results.append({
+                "ans_name": a.ans_name,
+                "owner_org": a.owner_org,
+                "verified": a.verified,
+                "assurance_tier": a.assurance_tier,
+                "orphan_risk": risk,
+                "last_verified": a.verified_at.isoformat() if a.verified_at else None,
+                "registered_at": a.registered_at.isoformat(),
+            })
+    session.commit()
+
+    results.sort(key=lambda r: risk_rank.get(r["orphan_risk"], 0), reverse=True)
+    return {"min_risk": min_risk, "count": len(results), "orphans": results[:limit]}
 
 
 @app.post("/ans/verify")
@@ -266,6 +504,11 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
         agent.verification_method = req.method
         agent.verified_at = datetime.utcnow()
 
+        # Domain control proven → at least DV. OV is preserved if already granted.
+        agent.assurance_tier = compute_assurance_tier(
+            True, req.method, agent.org_validated
+        )
+
         # Recalculate TrustScore with verification boost
         score, tier = calculate_trust_score(
             agent.agent_type, True, agent.capabilities, agent.source_url, agent.description
@@ -281,12 +524,55 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
         return {
             "status": "verified",
             "message": f"Agent '{agent.ans_name}' is now verified. Owner: {agent.owner_org}",
+            "assurance_tier": agent.assurance_tier,
             "trust_score": score,
             "trust_tier": tier,
             "badge_url": f"https://trustmodel.ai/badge/ans/{agent.ans_name}.svg",
         }
 
     return {"status": "failed", "message": "Verification failed."}
+
+
+@app.post("/ans/verify/org")
+def org_validate_agent(
+    req: OrgValidateRequest,
+    admin: AdminUser = Depends(require_admin),
+    session: Session = Depends(get_session),
+):
+    """
+    Org-validate an agent (OV tier) — TRUS-1257.
+
+    OV layers a confirmed legal organization on top of domain control (DV).
+    It's a manual review step, so it's admin-gated. The agent must already be
+    domain-verified (DV) before it can be promoted to OV.
+    """
+    agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    if not agent.verified or agent.assurance_tier == "unverified":
+        raise HTTPException(
+            status_code=409,
+            detail="Agent must be domain-verified (DV) before it can be org-validated (OV).",
+        )
+
+    agent.org_validated = True
+    agent.org_validated_by = admin.email
+    agent.assurance_tier = compute_assurance_tier(
+        agent.verified, agent.verification_method, True
+    )
+    agent.updated_at = datetime.utcnow()
+
+    session.add(agent)
+    session.commit()
+
+    return {
+        "status": "org_validated",
+        "ans_name": agent.ans_name,
+        "assurance_tier": agent.assurance_tier,
+        "org_validated_by": admin.email,
+        "message": f"'{agent.ans_name}' promoted to OV — organization '{agent.owner_org}' confirmed.",
+    }
 
 
 @app.post("/ans/transfer")
@@ -442,6 +728,10 @@ def registry_stats(session: Session = Depends(get_session)):
             t: len([a for a in all_agents if a.trust_tier == t])
             for t in ["Highly Trusted", "Generally Safe", "Use With Caution", "High Risk"]
         },
+        "by_assurance": {
+            t: len([a for a in all_agents if a.assurance_tier == t])
+            for t in ["unverified", "DV", "OV"]
+        },
     }
 
 
@@ -480,7 +770,12 @@ def root():
         "endpoints": {
             "register": "POST /ans/register",
             "lookup": "GET /ans/lookup/{agent-name}",
+            "whois": "GET /ans/whois/{agent-name}",
             "verify": "POST /ans/verify",
+            "org_validate": "POST /ans/verify/org",
+            "a2a_verify": "POST /ans/a2a/verify",
+            "typosquats": "GET /ans/typosquats/{agent-name}",
+            "orphans": "GET /ans/orphans",
             "transfer": "POST /ans/transfer",
             "accept_transfer": "POST /ans/transfer/accept",
             "search": "GET /ans/search?q=...",
