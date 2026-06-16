@@ -10,7 +10,6 @@ from .database import get_session
 from .models import Agent
 from .auth import (
     AdminUser,
-    admin_html,
     hash_password,
     verify_password,
     create_session,
@@ -21,7 +20,7 @@ from .auth import (
     seed_superadmin,
 )
 
-# We need admin_html from admin.py — import it
+# admin_html lives in admin.py
 from .admin import admin_html
 
 router = APIRouter()

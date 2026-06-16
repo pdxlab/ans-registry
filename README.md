@@ -41,12 +41,30 @@ curl -X POST http://localhost:8080/ans/register \
     "description": "CRM automation agent"
   }'
 
-# Look up an agent (WHOIS for agents)
+# Look up an agent (full record)
 curl http://localhost:8080/ans/lookup/my-sales-agent
 
-# Verify ownership
+# WHOIS-for-agents — compact registry record (owner, tier, AgentCert status)
+curl http://localhost:8080/ans/whois/my-sales-agent
+
+# Verify ownership — DNS TXT or email domain match earns the DV assurance tier
 curl -X POST http://localhost:8080/ans/verify \
   -d '{"ans_name": "my-sales-agent", "method": "email"}'
+
+# Org-validate (OV tier) — admin only; requires DV first
+curl -X POST http://localhost:8080/ans/verify/org \
+  -H "X-ANS-Admin-Key: ans-..." \
+  -d '{"ans_name": "my-sales-agent"}'
+
+# Agent-to-agent verify — does the target meet a minimum assurance bar?
+curl -X POST http://localhost:8080/ans/a2a/verify \
+  -d '{"target_ans_name": "my-sales-agent", "caller_ans_name": "buyer-bot", "min_assurance": "DV"}'
+
+# Typosquats targeting a name (edit-distance / homoglyph lookalikes)
+curl http://localhost:8080/ans/typosquats/my-sales-agent
+
+# Orphaned / orphan-risk names across the namespace
+curl http://localhost:8080/ans/orphans?min_risk=medium
 
 # Transfer ownership
 curl -X POST http://localhost:8080/ans/transfer \
@@ -57,6 +75,27 @@ curl http://localhost:8080/ans/search?q=sales&verified_only=true
 
 # View certificate
 curl http://localhost:8080/ans/cert/my-sales-agent
+```
+
+## Assurance Tiers
+
+AgentCert builds on DV/OV-style identity assurance, mirroring SSL certificates:
+
+| Tier | Meaning | How to earn |
+|---|---|---|
+| `unverified` | Registered, owner unproven | Default on registration |
+| `DV` | Domain validated | DNS TXT challenge or matching email domain (`POST /ans/verify`) |
+| `OV` | Organization validated | DV + admin org review (`POST /ans/verify/org`) |
+
+`POST /ans/a2a/verify` lets one agent check another against a minimum tier
+before connecting. The registry continuously flags **typosquats** (edit-distance
+/ homoglyph lookalikes) and **orphans** (names with no proven/active owner).
+
+## Tests
+
+```bash
+pip install -r requirements.txt
+pytest
 ```
 
 ## Deploy

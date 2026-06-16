@@ -26,6 +26,14 @@ class Agent(SQLModel, table=True):
     verification_token: str = Field(default_factory=lambda: f"ans-verify-{uuid.uuid4().hex[:16]}")
     verified_at: Optional[datetime] = None
 
+    # Assurance tier — AgentCert DV/OV-style identity assurance (TRUS-1257)
+    #   unverified — registered, no domain control proven
+    #   DV         — domain validated (DNS TXT or matching email domain proves control)
+    #   OV         — org validated (DV + manual review confirming the legal org)
+    assurance_tier: str = Field(default="unverified")  # unverified | DV | OV
+    org_validated: bool = Field(default=False)  # OV: org legitimacy manually reviewed
+    org_validated_by: str = Field(default="")  # admin email who confirmed the org
+
     # Agent details
     agent_type: str = Field(default="mcp_server")  # mcp_server | standalone | browser | api
     description: str = Field(default="", max_length=1000)
@@ -80,3 +88,14 @@ class LookupLog(SQLModel, table=True):
     ans_name: str
     requester_ip: str = Field(default="")
     looked_up_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class A2AVerificationLog(SQLModel, table=True):
+    """Log of agent-to-agent (a2a) verification calls (analytics + audit)."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    caller_ans_name: str = Field(default="")  # the agent asking (optional)
+    target_ans_name: str  # the agent being verified
+    result: str = Field(default="")  # verified | unverified | not_found | typosquat_warning
+    requester_ip: str = Field(default="")
+    verified_at: datetime = Field(default_factory=datetime.utcnow)
