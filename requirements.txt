@@ -1,7 +1,7 @@
 fastapi==0.115.0
 uvicorn==0.32.0
 sqlmodel==0.0.22
-pydantic==2.10.0
+pydantic>=2.8,<2.10
 python-multipart==0.0.17
 dnspython==2.7.0
 httpx==0.28.0
