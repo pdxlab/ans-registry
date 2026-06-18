@@ -32,7 +32,14 @@ from .admin import router as admin_router
 from .admin_auth import router as auth_router
 from .auth import seed_superadmin, AdminUser, require_admin
 from .database import create_db, get_session, engine
+from .logging_config import configure_logging
 from .models import Agent, Transfer, LookupLog, A2AVerificationLog
+
+# Install structured JSON logging before anything else writes to stdout.
+configure_logging()
+
+import logging
+logger = logging.getLogger(__name__)
 from .verification import (
     generate_verification_token,
     check_dns_txt,
@@ -68,10 +75,15 @@ app.include_router(auth_router)
 @app.on_event("startup")
 def on_startup():
     create_db()
-    # Seed Karl as superadmin on first startup
+    # Seed Karl as superadmin on first startup.
+    # In Cloud Run, Alembic has already run by start.sh — tables exist.
+    # In dev (without auto-create), this is a no-op until alembic upgrade head.
     from sqlmodel import Session
-    with Session(engine) as session:
-        seed_superadmin(session)
+    try:
+        with Session(engine) as session:
+            seed_superadmin(session)
+    except Exception:  # noqa: BLE001 — tolerate missing schema during early dev
+        logger.exception("seed_superadmin failed at startup (tables may not exist yet)")
 
 
 # ── Request/Response Models ──

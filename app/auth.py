@@ -10,6 +10,7 @@ Simple but secure:
 """
 
 import hashlib
+import logging
 import secrets
 import os
 from datetime import datetime, timedelta
@@ -19,6 +20,8 @@ from fastapi import HTTPException, Request, Depends
 from sqlmodel import SQLModel, Field, Session, select
 
 from .database import get_session
+
+logger = logging.getLogger(__name__)
 
 
 class AdminUser(SQLModel, table=True):
@@ -128,8 +131,10 @@ def seed_superadmin(session: Session):
         salt = secrets.token_hex(16)
         default_pw = os.environ.get("ANS_ADMIN_PASSWORD")
         if not default_pw:
-            print("[ANS] WARNING: Set ANS_ADMIN_PASSWORD env var before first startup.")
-            print("[ANS] Superadmin account NOT created. Set the env var and restart.")
+            logger.warning(
+                "Superadmin not seeded: ANS_ADMIN_PASSWORD is unset. "
+                "Set it via Secret Manager and restart to seed."
+            )
             return
         admin = AdminUser(
             email="knm@predixtions.com",
@@ -140,4 +145,7 @@ def seed_superadmin(session: Session):
         )
         session.add(admin)
         session.commit()
-        print(f"[ANS] Superadmin created: km@xspan.ai (API key: {admin.api_key})")
+        logger.info(
+            "Superadmin seeded",
+            extra={"admin_email": admin.email, "admin_id": admin.id},
+        )
