@@ -50,7 +50,19 @@ class GcpJsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
-        # `logger.info("msg", extra={"foo": "bar"})` lands here.
+        # Pick up the per-request id stamped by RequestIDMiddleware so every
+        # log record emitted during a request carries it automatically. Import
+        # lazily to avoid making the formatter depend on errors.py at module
+        # import time (decouples logging from FastAPI wiring).
+        try:
+            from .errors import request_id_ctx
+            rid = request_id_ctx.get()
+            if rid is not None:
+                payload["request_id"] = rid
+        except Exception:  # noqa: BLE001 — never let logging crash on its own plumbing
+            pass
+        # `logger.info("msg", extra={"foo": "bar"})` lands here. Per-call-site
+        # extras win over the contextvar value if both are present.
         for key, value in record.__dict__.items():
             if key in (
                 "args", "asctime", "created", "exc_info", "exc_text",
