@@ -2,7 +2,24 @@ fastapi==0.115.0
 uvicorn==0.32.0
 sqlmodel==0.0.22
 pydantic>=2.8,<2.10
+pydantic-settings>=2.5,<3
 python-multipart==0.0.17
 dnspython==2.7.0
 httpx==0.28.0
+
+# Postgres driver (psycopg v3, sync) — matches verified org pattern via private IP
+psycopg[binary]>=3.2,<4
+
+# Schema migrations — run via `alembic upgrade head` from start.sh on cold start
+alembic==1.14.0
+
+# Password hashing — replaces SHA-256+salt (see app/auth.py)
+passlib[argon2]==1.7.4
+
+# Structured stdout logging for Cloud Logging
+python-json-logger>=2.0,<3
+
+# Local-dev convenience (loads .env when present; skipped in production images)
+python-dotenv==1.0.1
+
 pytest==8.3.3
