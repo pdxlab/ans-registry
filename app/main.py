@@ -31,6 +31,7 @@ from sqlmodel import Session, select
 from .admin import router as admin_router
 from .admin_auth import router as auth_router
 from .auth import seed_superadmin, AdminUser, require_admin
+from .config import settings
 from .database import create_db, get_session, engine
 from .health import router as health_router
 from .logging_config import configure_logging
@@ -62,11 +63,18 @@ app = FastAPI(
     docs_url="/docs",
 )
 
+# CORS — origins are configurable via ANS_CORS_ORIGINS. The default is "*"
+# for local dev convenience, but in QA/prod set the env var to a comma-
+# separated allowlist. allow_credentials is automatically off when "*" is
+# in the list, per FastAPI/CORS rules (cookies can't ride a wildcard).
+_cors_origins = settings.cors_origin_list
+_cors_allow_credentials = "*" not in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-ANS-Admin-Key"],
 )
 
 
