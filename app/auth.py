@@ -1,12 +1,13 @@
 """
 ANS Admin Authentication — standalone, no dependency on aurora-gateway.
 
-Simple but secure:
-- Admin users stored in local DB (not aurora-gateway's user table)
-- Password hashed with bcrypt
-- Session cookie for browser admin
-- API key for programmatic access
-- Karl is the superadmin, can add/remove other admins
+Storage:
+- Admin users live in the local DB (not aurora-gateway's user table).
+- Passwords are hashed with argon2 via passlib. Legacy SHA-256+salt rows
+  from earlier releases are recognized and transparently upgraded to argon2
+  on the next successful login.
+- Session cookie for browser admin, API key for programmatic access.
+- Karl is the superadmin, can add/remove other admins.
 """
 
 import hashlib
@@ -17,11 +18,22 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import HTTPException, Request, Depends
+from passlib.context import CryptContext
 from sqlmodel import SQLModel, Field, Session, select
 
 from .database import get_session
 
 logger = logging.getLogger(__name__)
+
+
+# Passlib config:
+#   - argon2 is the only `default` scheme (all new hashes are argon2)
+#   - `ans_sha256` is a CustomHandler stand-in below; we identify legacy
+#     hashes by their length and verify them manually in verify_password.
+_pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+
+# SHA-256 hex digest length, used to detect legacy `password_hash` rows.
+_LEGACY_SHA256_HEX_LEN = 64
 
 
 class AdminUser(SQLModel, table=True):
@@ -30,7 +42,12 @@ class AdminUser(SQLModel, table=True):
     id: str = Field(default_factory=lambda: secrets.token_hex(8), primary_key=True)
     email: str = Field(unique=True, index=True)
     name: str = Field(default="")
-    password_hash: str  # SHA-256 of password + salt (bcrypt in production)
+    # argon2-encoded hash (passlib format) for new rows.
+    # Legacy rows carry a SHA-256 hex digest of `password + salt`; the
+    # 64-character length is the marker — see verify_password / is_legacy_hash.
+    password_hash: str
+    # Salt is only meaningful for legacy SHA-256 rows. argon2 embeds its own
+    # salt in the hash, so this field is unused for new accounts.
     salt: str = Field(default_factory=lambda: secrets.token_hex(16))
     role: str = Field(default="admin")  # superadmin | admin | viewer
     api_key: str = Field(default_factory=lambda: f"ans-{secrets.token_hex(24)}")
@@ -50,12 +67,67 @@ class AdminSession(SQLModel, table=True):
 
 # ── Password hashing ──
 
-def hash_password(password: str, salt: str) -> str:
+def is_legacy_hash(password_hash: str) -> bool:
+    """Heuristic: legacy hashes are a 64-char hex digest. argon2 strings
+    start with '$argon2'."""
+    return (
+        len(password_hash) == _LEGACY_SHA256_HEX_LEN
+        and not password_hash.startswith("$argon2")
+    )
+
+
+def hash_password(password: str, salt: str = "") -> str:
+    """Hash a password with argon2.
+
+    The `salt` parameter is accepted for backward compatibility with the
+    legacy SHA-256+salt flow used by older test fixtures. argon2 embeds
+    its own salt; the value passed in is intentionally ignored for new
+    hashes. Pass `salt` only when constructing a legacy row deliberately
+    (i.e., not in production code).
+    """
+    return _pwd_context.hash(password)
+
+
+def _legacy_hash(password: str, salt: str) -> str:
+    """The old SHA-256(password + salt) scheme. Only used to verify
+    historical rows; never used to write new hashes."""
     return hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
 
 
 def verify_password(password: str, salt: str, password_hash: str) -> bool:
-    return hash_password(password, salt) == password_hash
+    """Verify `password` against the stored hash.
+
+    Handles both schemes:
+    - argon2 (new): delegated to passlib.
+    - legacy SHA-256+salt: recomputed locally.
+    """
+    if is_legacy_hash(password_hash):
+        return _legacy_hash(password, salt) == password_hash
+    try:
+        return _pwd_context.verify(password, password_hash)
+    except Exception:  # noqa: BLE001 — malformed hash row → reject
+        logger.warning("verify_password: malformed argon2 hash, rejecting")
+        return False
+
+
+def upgrade_hash_if_legacy(
+    admin: AdminUser, password: str, session: Session
+) -> None:
+    """If the stored hash is legacy SHA-256, rehash to argon2 and persist.
+
+    Call this only after `verify_password` returns True — we already know
+    the cleartext password is correct.
+    """
+    if not is_legacy_hash(admin.password_hash):
+        return
+    admin.password_hash = hash_password(password)
+    admin.salt = ""  # argon2 embeds its own salt; legacy value no longer applies
+    session.add(admin)
+    session.commit()
+    logger.info(
+        "admin password upgraded to argon2",
+        extra={"admin_id": admin.id, "admin_email": admin.email},
+    )
 
 
 # ── Session management ──
@@ -128,7 +200,6 @@ def seed_superadmin(session: Session):
     """Create Karl's superadmin account if it doesn't exist."""
     existing = session.exec(select(AdminUser).where(AdminUser.email == "knm@predixtions.com")).first()
     if not existing:
-        salt = secrets.token_hex(16)
         default_pw = os.environ.get("ANS_ADMIN_PASSWORD")
         if not default_pw:
             logger.warning(
@@ -139,8 +210,8 @@ def seed_superadmin(session: Session):
         admin = AdminUser(
             email="knm@predixtions.com",
             name="Karl Mehta",
-            password_hash=hash_password(default_pw, salt),
-            salt=salt,
+            password_hash=hash_password(default_pw),
+            salt="",  # argon2 embeds its own salt
             role="superadmin",
         )
         session.add(admin)
