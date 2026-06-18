@@ -6,8 +6,6 @@ overriding the `get_session` dependency. The admin-gated endpoints are exercised
 through a seeded superadmin and its API key header.
 """
 
-import secrets
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine
@@ -45,13 +43,13 @@ def client_fixture(session):
 
 @pytest.fixture(name="admin_key")
 def admin_key_fixture(session):
-    """Seed a superadmin and return its API key for admin-gated endpoints."""
-    salt = secrets.token_hex(16)
+    """Seed a superadmin (argon2 hash) and return its API key for
+    admin-gated endpoints."""
     admin = AdminUser(
         email="admin@predixtions.com",
         name="Test Admin",
-        password_hash=hash_password("pw", salt),
-        salt=salt,
+        password_hash=hash_password("pw"),
+        salt="",  # argon2 embeds its own salt
         role="superadmin",
     )
     session.add(admin)
