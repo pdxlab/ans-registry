@@ -11,7 +11,6 @@ Local development falls back to a SQLite file so `pytest` and `uvicorn
 """
 
 import logging
-import os
 
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -24,26 +23,17 @@ def _resolve_database_url() -> str:
     """Return the DSN to hand to SQLAlchemy.
 
     Order of precedence:
-      1. ANS_DATABASE_URL (Settings) — canonical, used in QA/prod.
-      2. Legacy DATABASE_URL env var — kept for backward compatibility with
-         older local dev setups; emit a deprecation log when picked up.
-      3. SQLite file fallback — development convenience only.
+      1. ANS_DATABASE_URL (Settings)   — canonical; QA/prod via Secret Manager.
+      2. SQLite file fallback          — development convenience only.
+
+    Non-dev environments without ANS_DATABASE_URL fail loudly — Settings'
+    own validator catches it earlier; the explicit raise here is a
+    belt-and-suspenders for code paths that build Settings via overrides.
     """
     if settings.ans_database_url:
         return settings.ans_database_url
 
-    legacy = os.environ.get("DATABASE_URL")
-    if legacy:
-        logger.warning(
-            "DATABASE_URL is deprecated; rename to ANS_DATABASE_URL "
-            "to match the platform secret-mount convention."
-        )
-        return legacy
-
     if not settings.is_development:
-        # The Settings validator already catches this in cloud, but if
-        # someone bypasses validation we still refuse to fall back to SQLite
-        # in QA/prod.
         raise RuntimeError(
             "ANS_DATABASE_URL is unset in a non-development environment. "
             "Refusing to fall back to SQLite."
@@ -52,7 +42,7 @@ def _resolve_database_url() -> str:
     return "sqlite:///./ans_registry.db"
 
 
-DATABASE_URL = _resolve_database_url()
+_DATABASE_URL = _resolve_database_url()
 
 
 # pool_pre_ping=True validates connections from the pool before use — cheap
@@ -62,10 +52,10 @@ _engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}
 
 # SQLite needs `check_same_thread=False` to be used from FastAPI's
 # threadpool. psycopg/Postgres needs nothing extra.
-if DATABASE_URL.startswith("sqlite"):
+if _DATABASE_URL.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 
-engine = create_engine(DATABASE_URL, **_engine_kwargs)
+engine = create_engine(_DATABASE_URL, **_engine_kwargs)
 
 
 def create_db() -> None:
