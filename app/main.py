@@ -32,6 +32,7 @@ from .admin import router as admin_router
 from .admin_auth import router as auth_router
 from .auth import seed_superadmin, AdminUser, require_admin
 from .database import create_db, get_session, engine
+from .health import router as health_router
 from .logging_config import configure_logging
 from .models import Agent, Transfer, LookupLog, A2AVerificationLog
 
@@ -69,6 +70,8 @@ app.add_middleware(
 )
 
 
+# Health router goes first so probes hit it before any auth middleware.
+app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 
