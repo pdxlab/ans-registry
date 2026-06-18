@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
+from .config import settings
 from .database import get_session
 from .models import Agent
 from .auth import (
@@ -96,7 +97,18 @@ def login_submit(
     session.commit()
 
     response = RedirectResponse("/admin", status_code=302)
-    response.set_cookie(SESSION_COOKIE, session_id, httponly=True, max_age=86400, samesite="lax")
+    # Cookie hardening:
+    #   httponly=True   — JS cannot read it
+    #   secure=settings — true in QA/prod (HTTPS), false in local-dev HTTP
+    #   samesite=lax    — keeps cross-site POSTs from carrying the cookie
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        httponly=True,
+        secure=settings.ans_session_cookie_secure,
+        max_age=86400,
+        samesite="lax",
+    )
     return response
 
 
