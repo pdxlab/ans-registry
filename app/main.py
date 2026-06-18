@@ -33,6 +33,7 @@ from .admin_auth import router as auth_router
 from .auth import seed_superadmin, AdminUser, require_admin
 from .config import settings
 from .database import create_db, get_session, engine
+from . import errors as errors_mod
 from .health import router as health_router
 from .logging_config import configure_logging
 from .models import Agent, Transfer, LookupLog, A2AVerificationLog
@@ -77,6 +78,10 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-ANS-Admin-Key"],
 )
 
+
+# Request-id middleware + exception handlers must be installed before any
+# route is hit so 500s and request_id propagation cover every endpoint.
+errors_mod.install(app)
 
 # Health router goes first so probes hit it before any auth middleware.
 app.include_router(health_router)
