@@ -1,0 +1,49 @@
+# Keep the image small and free of dev cruft.
+# Anything not on this list still ships unless a parent pattern excludes it.
+
+# VCS / metadata
+.git
+.gitignore
+.gitattributes
+
+# Python cruft
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenvs (we install deps inside the builder stage, not from local venv)
+.venv/
+venv/
+env/
+
+# Test artifacts
+htmlcov/
+.coverage
+.coverage.*
+*.cover
+*.log
+
+# Local databases / env
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.local
+
+# CI / docs (rebuilt on the image build, not needed at runtime)
+.github/
+docs/
+*.md
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local Docker artefacts
+Dockerfile.local
+docker-compose*.yml
