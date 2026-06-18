@@ -11,6 +11,7 @@ from .models import Agent
 from .auth import (
     AdminUser,
     hash_password,
+    upgrade_hash_if_legacy,
     verify_password,
     create_session,
     get_current_admin,
@@ -80,6 +81,10 @@ def login_submit(
 
     if not verify_password(password, admin.salt, admin.password_hash):
         return RedirectResponse("/admin/login?error=Invalid+email+or+password", status_code=302)
+
+    # Successful login — opportunistically upgrade legacy SHA-256 hashes
+    # to argon2 now that we have the plaintext password in memory.
+    upgrade_hash_if_legacy(admin, password, session)
 
     # Create session
     session_id = create_session(admin, session)
@@ -163,14 +168,13 @@ def add_admin_user(
     if existing:
         return RedirectResponse("/admin/users?error=Email+already+exists", status_code=302)
 
-    salt = sec.token_hex(16)
     temp_password = sec.token_hex(8)  # 16-char temporary password
 
     new_admin = AdminUser(
         email=email.lower(),
         name=name,
-        password_hash=hash_password(temp_password, salt),
-        salt=salt,
+        password_hash=hash_password(temp_password),
+        salt="",  # argon2 embeds its own salt
         role=role,
     )
 
