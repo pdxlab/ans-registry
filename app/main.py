@@ -690,6 +690,14 @@ def search_agents(
     agent_type: Optional[str] = None,
     verified_only: bool = False,
     min_score: float = 0,
+    owner_org: Optional[str] = Query(
+        None,
+        description=(
+            "Exact owner_org match (case-insensitive). Used by aurora-gateway's "
+            "Mint AgentCert form to populate the ANS-name dropdown for the "
+            "caller's org (TRUS-1283 Gap 3c)."
+        ),
+    ),
     limit: int = 20,
     session: Session = Depends(get_session),
 ):
@@ -713,6 +721,11 @@ def search_agents(
 
     if min_score > 0:
         query = query.where(Agent.trust_score >= min_score)
+
+    if owner_org:
+        # Case-insensitive exact match — orgs may be stored with mixed case
+        # ("Predixtions" vs "predixtions"), and the gateway sends org.name.
+        query = query.where(Agent.owner_org.ilike(owner_org))
 
     query = query.limit(limit)
     agents = session.exec(query).all()
