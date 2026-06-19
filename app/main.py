@@ -15,6 +15,7 @@ Endpoints:
   POST /ans/transfer         — Initiate ownership transfer
   POST /ans/transfer/accept  — Accept a transfer
   GET  /ans/search           — Search agents
+  GET  /ans/directory        — Public directory of AgentCert-certified agents
   GET  /ans/stats            — Registry statistics
   GET  /ans/cert/{name}      — View TrustScore certificate
 """
@@ -157,6 +158,29 @@ class TransferRequest(BaseModel):
 class TransferAcceptRequest(BaseModel):
     transfer_token: str
     to_email: str  # new owner confirms
+
+
+class DirectoryItem(BaseModel):
+    """One row in the public AgentCert directory."""
+    ans_name: str
+    ans_id: str
+    display_name: str
+    owner_org: str
+    assurance_tier: str  # unverified | DV | OV
+    trust_score: Optional[float] = None  # 0-100, null if unknown
+    trust_tier: str
+    cert_status: str  # active | revoked
+    agentcert_status: str  # certified (DV|OV) | scored (unverified)
+    certified_at: Optional[str] = None  # ISO timestamp of the cert evaluation
+    registered_at: str  # ISO timestamp
+
+
+class DirectoryResponse(BaseModel):
+    total: int
+    count: int
+    limit: int
+    offset: int
+    items: list[DirectoryItem]
 
 
 # ── Validation ──
@@ -776,6 +800,87 @@ def registry_stats(session: Session = Depends(get_session)):
     }
 
 
+@app.get("/ans/directory", response_model=DirectoryResponse)
+def list_directory(
+    q: str = Query("", description="Search by agent name or org (substring, case-insensitive)"),
+    sort: str = Query("score", description="score (desc, default) | recent"),
+    min_score: float = Query(0, ge=0, le=100, description="Minimum TrustScore (0-100)"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """
+    Public AgentCert directory — TRUS-1284.
+
+    A paginated, searchable list of every agent that holds an AgentCert — i.e.
+    has a current TrustScore certificate (the same `has_cert` derivation the
+    WHOIS endpoint exposes). Powers the public directory page on trustmodel.ai.
+    Public, read-only, no auth.
+
+    Each item carries the agent name, owning org, DV/OV identity tier, 0-100
+    TrustScore, cert status (active/revoked), and the certification + registration
+    timestamps. Revoked agents are included with `cert_status="revoked"` so the
+    client can render the state; suspended/orphan names are not listed.
+    """
+    # An agent "holds an AgentCert" exactly when WHOIS would report a cert:
+    # a TrustScore that has been evaluated.
+    query = select(Agent).where(
+        Agent.trust_score != None,  # noqa: E711 — SQL IS NOT NULL
+        Agent.trust_evaluated_at != None,  # noqa: E711
+        Agent.status.in_(["active", "revoked"]),
+    )
+
+    if q:
+        term = q.lower()
+        query = query.where(
+            Agent.ans_name.contains(term) |
+            Agent.display_name.contains(q) |
+            Agent.owner_org.contains(q)
+        )
+
+    if min_score > 0:
+        query = query.where(Agent.trust_score >= min_score)
+
+    # total before pagination
+    total = len(session.exec(query).all())
+
+    if sort == "recent":
+        query = query.order_by(Agent.trust_evaluated_at.desc())
+    else:  # "score" (default)
+        query = query.order_by(Agent.trust_score.desc(), Agent.registered_at.desc())
+
+    agents = session.exec(query.offset(offset).limit(limit)).all()
+
+    items = []
+    for a in agents:
+        # Mirror the WHOIS AgentCert-status derivation.
+        if a.assurance_tier in (TIER_DV, TIER_OV):
+            agentcert_status = f"certified ({a.assurance_tier})"
+        else:
+            agentcert_status = "scored (unverified)"
+        items.append(DirectoryItem(
+            ans_name=a.ans_name,
+            ans_id=f"ans://{a.ans_name}.trustmodel.ai",
+            display_name=a.display_name,
+            owner_org=a.owner_org,
+            assurance_tier=a.assurance_tier,
+            trust_score=a.trust_score,
+            trust_tier=a.trust_tier,
+            cert_status="revoked" if a.status == "revoked" else "active",
+            agentcert_status=agentcert_status,
+            certified_at=a.trust_evaluated_at.isoformat() if a.trust_evaluated_at else None,
+            registered_at=a.registered_at.isoformat(),
+        ))
+
+    return DirectoryResponse(
+        total=total,
+        count=len(items),
+        limit=limit,
+        offset=offset,
+        items=items,
+    )
+
+
 @app.get("/ans/cert/{ans_name}")
 def view_certificate(ans_name: str, session: Session = Depends(get_session)):
     """View the TrustScore certificate for an agent."""
@@ -820,6 +925,7 @@ def root():
             "transfer": "POST /ans/transfer",
             "accept_transfer": "POST /ans/transfer/accept",
             "search": "GET /ans/search?q=...",
+            "directory": "GET /ans/directory?q=...&sort=score|recent",
             "stats": "GET /ans/stats",
             "certificate": "GET /ans/cert/{agent-name}",
         },

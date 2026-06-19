@@ -73,6 +73,14 @@ curl -X POST http://localhost:8080/ans/transfer \
 # Search registry
 curl http://localhost:8080/ans/search?q=sales&verified_only=true
 
+# Public AgentCert directory — every agent holding an AgentCert
+# (name, org, DV/OV tier, 0-100 TrustScore, cert status, timestamps)
+#   q         — search by agent name or org (substring)
+#   sort      — score (desc, default) | recent
+#   min_score — minimum TrustScore (0-100)
+#   limit / offset — pagination (limit capped at 100)
+curl "http://localhost:8080/ans/directory?q=sales&sort=score&min_score=50&limit=20&offset=0"
+
 # View certificate
 curl http://localhost:8080/ans/cert/my-sales-agent
 ```
