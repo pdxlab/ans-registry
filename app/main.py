@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .admin import router as admin_router
@@ -831,18 +832,24 @@ def list_directory(
     )
 
     if q:
-        term = q.lower()
+        # Case-insensitive substring match across all three fields. ``ilike``
+        # uses LOWER() on both sides so it works the same on SQLite (tests)
+        # and Postgres (prod) — ``contains`` defers to driver-specific
+        # collation, which is inconsistent across those two.
+        pattern = f"%{q}%"
         query = query.where(
-            Agent.ans_name.contains(term) |
-            Agent.display_name.contains(q) |
-            Agent.owner_org.contains(q)
+            Agent.ans_name.ilike(pattern) |
+            Agent.display_name.ilike(pattern) |
+            Agent.owner_org.ilike(pattern)
         )
 
     if min_score > 0:
         query = query.where(Agent.trust_score >= min_score)
 
-    # total before pagination
-    total = len(session.exec(query).all())
+    # total before pagination — use COUNT() instead of materialising every
+    # matching row (was O(n) per request; a hostile ``?q=`` could OOM us).
+    count_query = select(func.count()).select_from(query.subquery())
+    total = session.exec(count_query).one()
 
     if sort == "recent":
         query = query.order_by(Agent.trust_evaluated_at.desc())
