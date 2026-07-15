@@ -1,0 +1,89 @@
+name: Deploy Azure Prod
+
+# Guarded until AZURE_*_PROD variables are set. Follows the same pattern
+# as agp-control-plane's prod workflow.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-prod" to confirm'
+        required: true
+
+concurrency:
+  group: deploy-azure-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard
+        run: |
+          if [ -z "${{ vars.AZURE_SUBSCRIPTION_ID_PROD }}" ] || \
+             [ -z "${{ vars.ACR_NAME_PROD }}" ] || \
+             [ -z "${{ vars.RESOURCE_GROUP_PROD }}" ] || \
+             [ -z "${{ vars.ACA_NAME_PROD }}" ]; then
+            echo "::error::AZURE_*_PROD not set — prod not provisioned yet."
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.confirm }}" != "deploy-prod" ]; then
+            echo "::error::You must type 'deploy-prod' in the confirm input."
+            exit 1
+          fi
+
+  build-and-deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP_PROD }}
+      ACR_NAME: ${{ vars.ACR_NAME_PROD }}
+      ACA_NAME: ${{ vars.ACA_NAME_PROD }}
+      IMAGE_REPO: ans-registry
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_PROD }}
+
+      - id: tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=prod-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build + push
+        run: |
+          az acr build --registry "$ACR_NAME" \
+            --image "$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
+            --image "$IMAGE_REPO:prod-latest" \
+            --file Dockerfile .
+
+      - name: Deploy + set prod env vars
+        run: |
+          az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
+            --replace-env-vars \
+              "ANS_CORS_ORIGINS=${{ vars.ANS_CORS_ORIGINS_PROD }}" \
+              "AURORA_GATEWAY_URL=${{ vars.AURORA_GATEWAY_URL_PROD }}" \
+              "AGP_URL=${{ vars.AGP_URL_PROD }}" \
+              "ANS_ADMIN_TOKEN=secretref:ans-admin-token" \
+              "ANS_JWT_SECRET=secretref:ans-jwt-secret" \
+              "ANS_DATABASE_URL=secretref:ans-database-url" \
+            --output none
+
+      - name: Summary
+        run: |
+          echo "### ✅ Azure PROD deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`$IMAGE_REPO:${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
