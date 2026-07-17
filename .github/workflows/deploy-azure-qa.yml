@@ -63,15 +63,27 @@ jobs:
             --file Dockerfile .
 
       - name: Update ACA image + env vars
+        # `--replace-env-vars` overwrites every env var on the container.
+        # Enumerate ALL of them here — secret refs must match the ACA secret
+        # names already provisioned during Azure smoke (`ans-admin-password`,
+        # `ans-session-secret`, `ans-database-url`). App-side env var names
+        # come from app/config.py's Settings model (ans_admin_password →
+        # ANS_ADMIN_PASSWORD, ans_session_secret → ANS_SESSION_SECRET, etc.).
         run: |
           az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
             --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
             --replace-env-vars \
+              "APP_ENV=qa" \
+              "LOG_LEVEL=info" \
+              "WEB_WORKERS=2" \
+              "ANS_RUN_AUTO_CREATE=0" \
+              "ANS_ADMIN_EMAIL=knm@predixtions.com" \
+              "ANS_SESSION_COOKIE_SECURE=true" \
               "ANS_CORS_ORIGINS=https://trustmodel.pdxqa.com,https://trustmodel-az.pdxqa.com,https://stpdxqa23b578.z20.web.core.windows.net" \
               "AURORA_GATEWAY_URL=https://api-trustmodel-az.pdxqa.com" \
               "AGP_URL=https://agp-trustmodel-az.pdxqa.com" \
-              "ANS_ADMIN_TOKEN=secretref:ans-admin-token" \
-              "ANS_JWT_SECRET=secretref:ans-jwt-secret" \
+              "ANS_ADMIN_PASSWORD=secretref:ans-admin-password" \
+              "ANS_SESSION_SECRET=secretref:ans-session-secret" \
               "ANS_DATABASE_URL=secretref:ans-database-url" \
             --output none
 
