@@ -40,6 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # OIDC: this step requires a federated identity credential on the
+      # `github-actions-pdxlab` AAD app for subject
+      #   repo:pdxlab/<repo>:ref:refs/heads/main            (for QA)
+      #   repo:pdxlab/<repo>:environment:azure-prod         (for prod)
+      # If this step returns 403, the FIC is missing. See azure-deploy-runbook.md.
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
