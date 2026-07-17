@@ -1,0 +1,98 @@
+name: Deploy Azure QA
+
+# Deploys ans-registry to Azure Container Apps. Follows the pattern in
+# Ankit's azure-deploy-runbook.md (2026-07-15). Env vars pinned inline.
+#
+# Runbook substitutions vs AGP:
+#   - App name: ans-registry
+#   - Custom domain: ans-trustmodel-az.pdxqa.com
+#   - DB driver: postgresql+psycopg (NOT asyncpg — different from AGP)
+#   - KV secret prefix: ans-*
+#   - App Gateway rule priority: 60
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/workflows/build-and-push.yml'
+      - '.github/workflows/secrets-scan.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-azure-qa
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: rg-pdx-qa-eastus2
+  ACR_NAME: acrtmpdx23b578
+  ACA_NAME: ans-registry
+  IMAGE_REPO: ans-registry
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC: this step requires a federated identity credential on the
+      # `github-actions-pdxlab` AAD app for subject
+      #   repo:pdxlab/<repo>:ref:refs/heads/main            (for QA)
+      #   repo:pdxlab/<repo>:environment:azure-prod         (for prod)
+      # If this step returns 403, the FIC is missing. See azure-deploy-runbook.md.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_QA }}
+
+      - id: tag
+        run: echo "tag=main-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Build + push image via ACR
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
+            --image "$IMAGE_REPO:main-latest" \
+            --file Dockerfile .
+
+      - name: Update ACA image + env vars
+        run: |
+          az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
+            --replace-env-vars \
+              "ANS_CORS_ORIGINS=https://trustmodel.pdxqa.com,https://trustmodel-az.pdxqa.com,https://stpdxqa23b578.z20.web.core.windows.net" \
+              "AURORA_GATEWAY_URL=https://api-trustmodel-az.pdxqa.com" \
+              "AGP_URL=https://agp-trustmodel-az.pdxqa.com" \
+              "ANS_ADMIN_TOKEN=secretref:ans-admin-token" \
+              "ANS_JWT_SECRET=secretref:ans-jwt-secret" \
+              "ANS_DATABASE_URL=secretref:ans-database-url" \
+            --output none
+
+      - name: Wait for revision to be Healthy
+        run: |
+          for i in $(seq 1 20); do
+            REV=$(az containerapp show -n "$ACA_NAME" -g "$RESOURCE_GROUP" --query "properties.latestRevisionName" -o tsv)
+            HEALTH=$(az containerapp revision show -n "$ACA_NAME" -g "$RESOURCE_GROUP" --revision "$REV" --query "properties.healthState" -o tsv 2>/dev/null || echo "Unknown")
+            echo "poll #$i: rev=$REV health=$HEALTH"
+            [ "$HEALTH" = "Healthy" ] && break
+            sleep 15
+          done
+
+      - name: Smoke test — public URL
+        run: |
+          CODE=$(curl -sk -o /dev/null -w "%{http_code}" https://ans-trustmodel-az.pdxqa.com/health)
+          echo "public health: $CODE"
+          [ "$CODE" = "200" ] || (echo "::error::/health returned $CODE"; exit 1)
+
+      - name: Summary
+        run: |
+          echo "### ✅ Azure QA deploy complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- URL: https://ans-trustmodel-az.pdxqa.com/" >> $GITHUB_STEP_SUMMARY
