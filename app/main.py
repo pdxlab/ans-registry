@@ -199,15 +199,32 @@ class DirectoryResponse(BaseModel):
 
 
 def validate_ans_name(name: str) -> str:
-    """Validate ANS name: lowercase, alphanumeric, hyphens, 3-63 chars."""
-    name = name.lower().strip()
-    if not re.match(r'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', name):
+    """Validate an ANS name and return it normalized (TRUS-1550).
+
+    Accepts two forms:
+      * **ANS v2** (Linux Foundation, DNS-anchored): ``ans://v<semver>.<host>``,
+        e.g. ``ans://v1.0.0.support.acme.com`` — validated via the resolver's
+        grammar. This is the going-forward format; v2 identity lives in the
+        owner's DNS, not this registry.
+      * **Legacy**: a 3-63 char lowercase alphanumeric+hyphen label, e.g.
+        ``salesforce-einstein-crm`` (kept for backward compatibility).
+    """
+    raw = (name or "").strip()
+    if raw.lower().startswith("ans://"):
+        try:
+            version, host = resolver_mod.parse_ans_v2(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return f"ans://v{version}.{host}"
+
+    legacy = raw.lower()
+    if not re.match(r'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', legacy):
         raise HTTPException(
             status_code=400,
-            detail="ANS name must be 3-63 characters, lowercase alphanumeric and hyphens only, "
-                   "cannot start or end with a hyphen."
+            detail="ANS name must be an ANS v2 name (ans://v1.0.0.host.example.com) or a "
+                   "legacy 3-63 char lowercase alphanumeric+hyphen label.",
         )
-    return name
+    return legacy
 
 
 # ── Endpoints ──
