@@ -39,6 +39,7 @@ from . import errors as errors_mod
 from .health import router as health_router
 from .logging_config import configure_logging
 from .models import Agent, Transfer, LookupLog, A2AVerificationLog
+from . import resolver as resolver_mod
 
 # Install structured JSON logging before anything else writes to stdout.
 configure_logging()
@@ -322,6 +323,20 @@ def lookup_agent(ans_name: str, request: Request, session: Session = Depends(get
         "orphan_risk": agent.orphan_risk,
         "detailed_eval_url": "https://trustmodel.ai/developers",
     }
+
+
+@app.get("/ans/resolve/{ans_name:path}")
+def resolve_ans_v2_endpoint(ans_name: str):
+    """Resolve a DNS-anchored ANS v2 name (TRUS-1545).
+
+    ``ans://v<semver>.<host>`` → ``{dnssec, ans_record?, identity, trust_index?}``
+    read from the owner's DNS zone. Public + read-only (no registry row needed —
+    v2 identity lives in the owner's DNS, not our registry).
+    """
+    try:
+        return resolver_mod.resolve_ans_v2(ans_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/ans/whois/{ans_name}")
