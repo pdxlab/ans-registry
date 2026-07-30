@@ -30,7 +30,21 @@ _HOST_RE = re.compile(
 )
 
 # A DNSSEC-validating resolver used only to read the Authenticated Data flag.
-_VALIDATING_RESOLVER = "1.1.1.1"
+import os
+
+# Ordered fallback list of validating (DNSSEC-capable) resolvers. On timeout or
+# transient failure we try the next entry rather than immediately reporting
+# ``dnssec: "unknown"`` — one provider hiccuping shouldn't flip every resolution
+# to insecure for downstream consumers. Configurable via ``ANS_DNSSEC_RESOLVERS``
+# (comma-separated). Defaults keep Cloudflare first for latency, then Google,
+# then Quad9 as a fully-independent third choice.
+_DEFAULT_RESOLVERS = "1.1.1.1,8.8.8.8,9.9.9.9"
+_DNSSEC_PER_QUERY_TIMEOUT = 3  # seconds; multiplied by len(resolvers) in worst case
+
+
+def _dnssec_resolvers() -> list[str]:
+    raw = os.getenv("ANS_DNSSEC_RESOLVERS", _DEFAULT_RESOLVERS)
+    return [ip.strip() for ip in raw.split(",") if ip.strip()]
 
 
 def parse_ans_v2(name: str) -> tuple[str, str]:
@@ -78,13 +92,24 @@ def _tlsa(name: str) -> dict:
 
 
 def _dnssec_status(qname: str) -> str:
-    """Return 'secure' when a validating resolver marks the answer Authenticated."""
-    try:
-        query = dns.message.make_query(dns.name.from_text(qname), dns.rdatatype.TXT, want_dnssec=True)
-        response = dns.query.udp(query, _VALIDATING_RESOLVER, timeout=5)
+    """Return 'secure' when a validating resolver marks the answer Authenticated.
+
+    Walks the ordered ``ANS_DNSSEC_RESOLVERS`` list on transient failures so a
+    single provider outage doesn't downgrade every resolution to ``unknown``.
+    Returns ``insecure`` as soon as any resolver answers without the AD flag —
+    that's a substantive answer, not a transport failure — and only returns
+    ``unknown`` when every resolver refuses to answer.
+    """
+    query = dns.message.make_query(
+        dns.name.from_text(qname), dns.rdatatype.TXT, want_dnssec=True
+    )
+    for resolver_ip in _dnssec_resolvers():
+        try:
+            response = dns.query.udp(query, resolver_ip, timeout=_DNSSEC_PER_QUERY_TIMEOUT)
+        except Exception:
+            continue
         return "secure" if (response.flags & dns.flags.AD) else "insecure"
-    except Exception:
-        return "unknown"
+    return "unknown"
 
 
 def build_resolution(*, ans_record: str | None, badge: str | None, tlsa: dict, dnssec: str) -> dict:
