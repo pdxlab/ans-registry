@@ -27,6 +27,9 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -39,6 +42,7 @@ from . import errors as errors_mod
 from .health import router as health_router
 from .logging_config import configure_logging
 from .models import Agent, Transfer, LookupLog, A2AVerificationLog
+from . import resolver as resolver_mod
 
 # Install structured JSON logging before anything else writes to stdout.
 configure_logging()
@@ -65,6 +69,13 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
 )
+
+# Per-IP rate limiter for public endpoints. See requirements.txt note on
+# in-memory storage vs. Redis. get_remote_address reads request.client.host,
+# which under a Cloud Run ingress + LB is already the client IP.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS — origins are configurable via ANS_CORS_ORIGINS. The default is "*"
 # for local dev convenience, but in QA/prod set the env var to a comma-
@@ -322,6 +333,38 @@ def lookup_agent(ans_name: str, request: Request, session: Session = Depends(get
         "orphan_risk": agent.orphan_risk,
         "detailed_eval_url": "https://trustmodel.ai/developers",
     }
+
+
+@app.get("/ans/resolve/{ans_name:path}")
+@limiter.limit("60/minute")
+def resolve_ans_v2_endpoint(
+    ans_name: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Resolve a DNS-anchored ANS v2 name (TRUS-1545).
+
+    ``ans://v<semver>.<host>`` → ``{dnssec, ans_record?, identity, trust_index?}``
+    read from the owner's DNS zone. Public + read-only (no registry row needed —
+    v2 identity lives in the owner's DNS, not our registry).
+
+    Rate-limited to 60/min per client IP (each call triggers three DNS queries
+    against caller-supplied hostnames — the risk is DNS-amplification, not the
+    tiny per-request server cost). Every call is appended to ``LookupLog``,
+    matching the analytics stream of ``/ans/lookup`` and ``/ans/whois``.
+    """
+    try:
+        result = resolver_mod.resolve_ans_v2(ans_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    log = LookupLog(
+        ans_name=ans_name,
+        requester_ip=request.client.host if request.client else "",
+    )
+    session.add(log)
+    session.commit()
+    return result
 
 
 @app.get("/ans/whois/{ans_name}")
