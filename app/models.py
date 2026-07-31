@@ -12,7 +12,7 @@ class Agent(SQLModel, table=True):
     """A registered AI agent in the ANS registry."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    ans_name: str = Field(unique=True, index=True, max_length=100)  # e.g. "salesforce-einstein-crm"
+    ans_name: str = Field(unique=True, index=True, max_length=300)  # legacy label OR ANS v2 name "ans://v1.0.0.host.example.com"
     display_name: str = Field(max_length=255)  # e.g. "Salesforce Einstein CRM Agent"
 
     # Owner
