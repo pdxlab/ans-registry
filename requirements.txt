@@ -19,6 +19,12 @@ passlib[argon2]==1.7.4
 # Structured stdout logging for Cloud Logging
 python-json-logger>=2.0,<3
 
+# Per-IP rate limiting for public endpoints. In-memory storage is fine at
+# maxScale=3; each replica enforces its own bucket, so the effective limit is
+# (per-instance rate × replica count). If we grow, swap in Redis via
+# ``storage_uri`` in the Limiter constructor.
+slowapi==0.1.9
+
 # Local-dev convenience (loads .env when present; skipped in production images)
 python-dotenv==1.0.1
 
