@@ -36,6 +36,7 @@ env:
 
 jobs:
   build-and-deploy:
+    environment: azure-qa
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
