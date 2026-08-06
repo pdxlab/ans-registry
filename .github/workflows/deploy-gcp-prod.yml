@@ -1,0 +1,152 @@
+# Deploy ans-registry to GCP Cloud Run prod (warm-parallel to Azure).
+#
+# Prod cloud state
+# ----------------
+# GCP prod (`us-central-1-prod-01`) is a warm-standby for Azure. User traffic
+# terminates on Azure Front Door; GCP is kept in sync so we can shift DNS back
+# if Azure has an incident. This workflow does NOT flip traffic — it only
+# refreshes the Cloud Run revision on GCP so it's ready to take over.
+#
+# Trigger
+# -------
+# Manual (`workflow_dispatch`) only. We intentionally do NOT auto-fire on
+# push-to-main until we've done a few manual cycles and gained confidence.
+# Once trusted, add: on.push.tags: ['v*'] to mirror the Azure trigger shape.
+#
+# What it deploys
+# ---------------
+# Cloud Run service on us-central-1-prod-01, image built once and
+# referenced by digest.
+#
+# Image
+# -----
+# Built once, pushed to the shared Artifact Registry at
+# splendid-sector-362217/predixtions/aurora-gateway, then referenced by
+# digest for atomic revision creation.
+#
+# Auth
+# ----
+# OIDC federation via the QA project's `github-actions` WIF pool. The deploy
+# SA `github-actions-deploy@us-central-1-prod-01` was bound to each pdxlab/<repo>
+# principal by scripts/gcp-github-actions-bootstrap.sh.
+name: Deploy GCP Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-gcp-prod" to confirm'
+        required: true
+
+concurrency:
+  group: deploy-gcp-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_PROJECT_ID_PROD: us-central-1-prod-01
+  GCP_ARTIFACT_REGISTRY_PROJECT: splendid-sector-362217
+  GCP_REGION: us-central1
+  GCP_ARTIFACT_REPO: predixtions
+  GCP_RUN_SERVICE_NAME: ans-registry
+  GCP_RUNTIME_SA: 793640043116-compute@developer.gserviceaccount.com
+  IMAGE_REPO: ans-registry
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm intent
+        run: |
+          if [[ "${{ inputs.confirm }}" != "deploy-gcp-prod" ]]; then
+            echo "❌ confirm input must be exactly 'deploy-gcp-prod'"
+            exit 1
+          fi
+          echo "✅ prod deploy confirmed"
+
+  build-and-deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth via WIF
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Docker auth for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Compute image tag
+        id: img
+        run: |
+          SHA="${GITHUB_SHA::12}"
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_ARTIFACT_REGISTRY_PROJECT}/${GCP_ARTIFACT_REPO}/${IMAGE_REPO}:${SHA}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push image
+        run: |
+          docker build -t "${{ steps.img.outputs.image }}" .
+          docker push "${{ steps.img.outputs.image }}"
+
+      - name: Resolve pushed image digest
+        id: digest
+        run: |
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${{ steps.img.outputs.image }}" \
+            --format='value(image_summary.digest)')
+          IMAGE_BY_DIGEST="${GCP_REGION}-docker.pkg.dev/${GCP_ARTIFACT_REGISTRY_PROJECT}/${GCP_ARTIFACT_REPO}/${IMAGE_REPO}@${DIGEST}"
+          echo "image_by_digest=${IMAGE_BY_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Cloud Run service
+        run: |
+          gcloud run deploy "${GCP_RUN_SERVICE_NAME}" \
+            --project="${GCP_PROJECT_ID_PROD}" \
+            --region="${GCP_REGION}" \
+            --image="${{ steps.digest.outputs.image_by_digest }}" \
+            --service-account="${GCP_RUNTIME_SA}" \
+            --quiet
+
+      - name: Wait for revision to be ready
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            READY=$(gcloud run services describe "${GCP_RUN_SERVICE_NAME}" \
+              --project="${GCP_PROJECT_ID_PROD}" --region="${GCP_REGION}" \
+              --format='value(status.conditions.filter("type=Ready").status)')
+            [[ "$READY" == "True" ]] && { echo "✓ revision ready"; exit 0; }
+            sleep $((attempt * 5))
+          done
+          echo "❌ revision did not become Ready in time"
+          exit 1
+
+
+      - name: Post-deploy smoke — service responds
+        run: |
+          URL=$(gcloud run services describe "${GCP_RUN_SERVICE_NAME}" \
+            --project="${GCP_PROJECT_ID_PROD}" --region="${GCP_REGION}" \
+            --format='value(status.url)')
+          for attempt in 1 2 3 4 5; do
+            status=$(curl -sk -o /dev/null -w "%{http_code}" "${URL}/health/" || echo "000")
+            [[ "$status" == "200" ]] && { echo "✓ ${URL}/health/ -> $status"; exit 0; }
+            sleep $((attempt * 3))
+          done
+          echo "❌ ${URL}/health/ stayed non-200"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Deploy summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ steps.digest.outputs.image_by_digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Service: \`${GCP_RUN_SERVICE_NAME}\` on \`${GCP_PROJECT_ID_PROD}\`" >> "$GITHUB_STEP_SUMMARY"
