@@ -1,0 +1,264 @@
+# Unified multicloud prod deploy — build the image ONCE, push it to whichever
+# clouds' registries the caller selected, then update the running service on
+# those same clouds. Sibling to the existing single-cloud workflows; neither
+# `deploy-azure-prod.yml` nor `deploy-gcp-prod.yml` is touched by this file.
+#
+# The `targets` input controls scope. Building is cloud-agnostic (local
+# `docker build` on the GHA runner). Push+deploy per cloud only happens if
+# that cloud is selected — so a `targets=gcp` run never even attempts Azure
+# OIDC, and vice versa.
+#
+# Tag naming
+# ----------
+# - Runs off `main` produce `prod-<sha>` tags (real prod artifacts).
+# - Any other ref (accidentally dispatched) produces `testbuild-<sha>` tags.
+#
+# Real deploy:
+#   gh workflow run deploy-multicloud-prod.yml --ref main \
+#       -f confirm=deploy-multicloud-prod -f targets=all
+#
+# Proven end-to-end on 2026-08-06 (auth-gateway, targets=gcp, revision
+# auth-gateway-00008-k8w serving 100%). See §9 of the MT-QA-to-Prod runbook
+# for the parity-sync details that had to happen before Cloud Run would boot
+# with the current Azure image.
+name: Deploy Multicloud Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-multicloud-prod" to confirm'
+        required: true
+      targets:
+        description: 'Where to push+deploy'
+        type: choice
+        required: true
+        default: all
+        options:
+          - all       # push to every registry + deploy to every runtime
+          - azure     # ACR push + ACA deploy only
+          - gcp       # Artifact Registry push + Cloud Run deploy only
+          - aws       # ECR push + ECS/EKS deploy only (stubbed — see below)
+          - none      # dry — build only, no push, no deploy
+
+concurrency:
+  group: deploy-multicloud-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Azure side
+  AZ_RG:               rg-pdx-prod-centralus
+  AZ_ACA_NAME:         ans-registry
+  AZ_ACR_NAME:         acrtmpdx23b578
+  AZ_ACR_LOGIN_SERVER: acrtmpdx23b578.azurecr.io
+  # GCP side
+  GCP_PROJECT_ID_PROD:           us-central-1-prod-01
+  GCP_ARTIFACT_REGISTRY_PROJECT: splendid-sector-362217
+  GCP_REGION:                    us-central1
+  GCP_ARTIFACT_REPO:             predixtions
+  GCP_RUN_SERVICE_NAME:          ans-registry
+  GCP_RUNTIME_SA:                793640043116-compute@developer.gserviceaccount.com
+  # Shared
+  IMAGE_REPO: ans-registry
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_azure: ${{ steps.compute.outputs.deploy_azure }}
+      deploy_gcp:   ${{ steps.compute.outputs.deploy_gcp }}
+      deploy_aws:   ${{ steps.compute.outputs.deploy_aws }}
+      tag_prefix:   ${{ steps.compute.outputs.tag_prefix }}
+    steps:
+      - name: Resolve targets + tag prefix
+        id: compute
+        run: |
+          if [[ "${{ inputs.confirm }}" != "deploy-multicloud-prod" ]]; then
+            echo "❌ confirm input must be exactly 'deploy-multicloud-prod'"
+            exit 1
+          fi
+          TARGETS="${{ inputs.targets }}"
+          echo "🟢 dispatch — targets=${TARGETS}"
+
+          # Emit per-cloud booleans.
+          for cloud in azure gcp aws; do
+            if [[ "$TARGETS" == "all" || "$TARGETS" == "$cloud" ]]; then
+              echo "deploy_${cloud}=true"  >> "$GITHUB_OUTPUT"
+              echo "  ✓ ${cloud}"
+            else
+              echo "deploy_${cloud}=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+          # Only main-branch runs produce prod-* tags. Anything else is a
+          # test artifact (e.g. someone dispatches from a feature ref).
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tag_prefix=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_prefix=testbuild" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: guard
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_azure:          ${{ needs.guard.outputs.deploy_azure }}
+      deploy_gcp:            ${{ needs.guard.outputs.deploy_gcp }}
+      deploy_aws:            ${{ needs.guard.outputs.deploy_aws }}
+      image_by_digest_azure: ${{ steps.digest.outputs.image_by_digest_azure }}
+      image_by_digest_gcp:   ${{ steps.digest.outputs.image_by_digest_gcp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHA=$(git rev-parse --short=7 HEAD)
+          TAG="${{ needs.guard.outputs.tag_prefix }}-${SHA}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # Azure — only if selected
+      - name: Azure Login (OIDC)
+        if: needs.guard.outputs.deploy_azure == 'true'
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_PROD }}
+      - name: Docker auth — Azure ACR
+        if: needs.guard.outputs.deploy_azure == 'true'
+        run: az acr login --name "${AZ_ACR_NAME}"
+
+      # GCP — only if selected
+      - name: GCP Auth (WIF)
+        if: needs.guard.outputs.deploy_gcp == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account:            ${{ secrets.GCP_DEPLOY_SA_EMAIL }}
+      - name: Set up gcloud
+        if: needs.guard.outputs.deploy_gcp == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Docker auth — GCP Artifact Registry
+        if: needs.guard.outputs.deploy_gcp == 'true'
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      # AWS — stubbed (no infra yet)
+      - name: AWS auth (STUB — bootstrap needed)
+        if: needs.guard.outputs.deploy_aws == 'true'
+        run: |
+          echo "❌ AWS target selected but AWS-side bootstrap is not done."
+          echo "   Needed: ECR repo, ECS or EKS cluster, GHA OIDC role trust."
+          echo "   Wire this step to 'aws-actions/configure-aws-credentials@v4' once ready."
+          exit 1
+
+      # Single docker build for whichever registries are enabled
+      - name: Build image (single build, per-registry tags)
+        id: build
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          TAGS_ARG=""
+          if [[ "${{ needs.guard.outputs.deploy_azure }}" == "true" ]]; then
+            IMG_AZ="${AZ_ACR_LOGIN_SERVER}/${IMAGE_REPO}:${TAG}"
+            TAGS_ARG="${TAGS_ARG} -t ${IMG_AZ}"
+            echo "img_az=${IMG_AZ}" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "${{ needs.guard.outputs.deploy_gcp }}" == "true" ]]; then
+            IMG_GCP="${GCP_REGION}-docker.pkg.dev/${GCP_ARTIFACT_REGISTRY_PROJECT}/${GCP_ARTIFACT_REPO}/${IMAGE_REPO}:${TAG}"
+            TAGS_ARG="${TAGS_ARG} -t ${IMG_GCP}"
+            echo "img_gcp=${IMG_GCP}" >> "$GITHUB_OUTPUT"
+          fi
+          # No target selected (targets=none) → just build & discard.
+          if [[ -z "$TAGS_ARG" ]]; then
+            TAGS_ARG="-t local-build:${TAG}"
+          fi
+          docker build \
+            --build-arg "GITHUB_TOKEN=${{ secrets.GHCR_TOKEN }}" \
+            ${TAGS_ARG} \
+            .
+
+      - name: Push to Azure ACR
+        if: needs.guard.outputs.deploy_azure == 'true'
+        run: docker push "${{ steps.build.outputs.img_az }}"
+
+      - name: Push to GCP Artifact Registry
+        if: needs.guard.outputs.deploy_gcp == 'true'
+        run: docker push "${{ steps.build.outputs.img_gcp }}"
+
+      - name: Resolve pushed digests
+        id: digest
+        run: |
+          # Registries compute manifest sha256 independently, so per-registry
+          # digests differ by design — the underlying layers are identical,
+          # only the per-registry manifest is signed differently.
+          if [[ "${{ needs.guard.outputs.deploy_azure }}" == "true" ]]; then
+            DIGEST_AZ=$(az acr repository show \
+              --name "${AZ_ACR_NAME}" \
+              --image "${IMAGE_REPO}:${{ steps.tag.outputs.tag }}" \
+              --query "digest" -o tsv)
+            IMG_BY_DIGEST_AZ="${AZ_ACR_LOGIN_SERVER}/${IMAGE_REPO}@${DIGEST_AZ}"
+            echo "image_by_digest_azure=${IMG_BY_DIGEST_AZ}" >> "$GITHUB_OUTPUT"
+            echo "- Azure ACR: \`${IMG_BY_DIGEST_AZ}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "${{ needs.guard.outputs.deploy_gcp }}" == "true" ]]; then
+            DIGEST_GCP=$(gcloud artifacts docker images describe \
+              "${{ steps.build.outputs.img_gcp }}" \
+              --format='value(image_summary.digest)')
+            IMG_BY_DIGEST_GCP="${GCP_REGION}-docker.pkg.dev/${GCP_ARTIFACT_REGISTRY_PROJECT}/${GCP_ARTIFACT_REPO}/${IMAGE_REPO}@${DIGEST_GCP}"
+            echo "image_by_digest_gcp=${IMG_BY_DIGEST_GCP}" >> "$GITHUB_OUTPUT"
+            echo "- GCP AR:    \`${IMG_BY_DIGEST_GCP}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy-azure:
+    needs: build
+    if: needs.build.outputs.deploy_azure == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_PROD }}
+      - name: Update ACA to new image
+        run: |
+          az containerapp update -g "${AZ_RG}" -n "${AZ_ACA_NAME}" \
+            --image "${{ needs.build.outputs.image_by_digest_azure }}"
+
+  deploy-gcp:
+    needs: build
+    if: needs.build.outputs.deploy_gcp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: GCP Auth (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account:            ${{ secrets.GCP_DEPLOY_SA_EMAIL }}
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy Cloud Run service
+        run: |
+          gcloud run deploy "${GCP_RUN_SERVICE_NAME}" \
+            --project="${GCP_PROJECT_ID_PROD}" \
+            --region="${GCP_REGION}" \
+            --image="${{ needs.build.outputs.image_by_digest_gcp }}" \
+            --service-account="${GCP_RUNTIME_SA}" \
+            --quiet
+
+  deploy-aws:
+    needs: build
+    if: needs.build.outputs.deploy_aws == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: AWS deploy (STUB)
+        run: |
+          echo "❌ AWS target selected but AWS-side bootstrap is not done."
+          echo "   Wire an aws ecs update-service (or eks kubectl set image) step here."
+          exit 1
