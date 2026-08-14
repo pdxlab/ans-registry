@@ -11,13 +11,12 @@ name: Deploy Azure QA
 #   - App Gateway rule priority: 60
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/workflows/build-and-push.yml'
-      - '.github/workflows/secrets-scan.yml'
+  # TRUS-1721: manual-dispatch only. Removed ``push: branches: [main]``
+  # because auto-deploys were clobbering in-flight QA test sessions
+  # (Priyanka's supply-chain branch testing was the surfacing case:
+  # unrelated main merges were replacing her QA image mid-test, losing
+  # state + repros). Same shape prod already has. Roll back = re-add
+  # the ``push:`` block above ``workflow_dispatch:``.
   workflow_dispatch:
 
 concurrency:
