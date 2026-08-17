@@ -97,7 +97,7 @@ jobs:
 
       - name: Build + push image
         run: |
-          docker build -t "${{ steps.img.outputs.image }}" .
+          docker build --build-arg "GITHUB_TOKEN=${{ secrets.GHCR_TOKEN }}" -t "${{ steps.img.outputs.image }}" .
           docker push "${{ steps.img.outputs.image }}"
 
       - name: Resolve pushed image digest
