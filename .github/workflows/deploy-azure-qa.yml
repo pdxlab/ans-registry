@@ -79,7 +79,7 @@ jobs:
               "ANS_RUN_AUTO_CREATE=0" \
               "ANS_ADMIN_EMAIL=knm@predixtions.com" \
               "ANS_SESSION_COOKIE_SECURE=true" \
-              "ANS_CORS_ORIGINS=https://trustmodel.pdxqa.com,https://trustmodel-az.pdxqa.com,https://stpdxqa23b578.z20.web.core.windows.net" \
+              "ANS_CORS_ORIGINS=https://app.pdxqa.com,https://trustmodel.pdxqa.com,https://trustmodel-az.pdxqa.com,https://stpdxqa23b578.z20.web.core.windows.net" \
               "AURORA_GATEWAY_URL=https://api-trustmodel-az.pdxqa.com" \
               "AGP_URL=https://agp-trustmodel-az.pdxqa.com" \
               "ANS_ADMIN_PASSWORD=secretref:ans-admin-password" \
