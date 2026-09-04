@@ -1,0 +1,60 @@
+# Argus config — ans-registry (FastAPI + SQLAlchemy/Alembic). Vendored from karlmehta/argus@v1.
+
+version: 1
+
+skills:
+  - security
+  - data-protection
+  - correctness
+  - concurrency
+  - performance
+  - api-compat
+  - tests
+  - observability
+  - dependencies
+
+gate: major
+
+verdict:
+  # POSTURE (owner decision, Ankit — 2026-09-04): Argus REVIEWS, it never MERGES.
+  #
+  #   zero blocker/major  -> gh pr review --approve
+  #   any blocker/major   -> gh pr review --request-changes
+  #   minor/nit only      -> approve, with the nits noted in the summary body
+  #
+  # The blocker/major split is `gate: major` above. This matches upstream
+  # prompts/verdict.md, so the vendored tree stays byte-identical to
+  # karlmehta/argus@v1 and re-vendoring remains a clean copy.
+  #
+  # Argus does not merge, ever, enforced three independent ways: no `gh pr merge`
+  # in the workflow's allowedTools, no automerge workflow in this repo (the one
+  # behind the aurora-gateway incident was deleted in #528 — do not reintroduce
+  # it), and repo-level allow_auto_merge is false.
+  allow_approve: true
+  on_findings: request_changes
+  never_approve_authors:
+    - "dependabot[bot]"
+    - "renovate[bot]"
+    - "argus[bot]"
+
+paths:
+  skip:
+    - "alembic/versions/**"        # api-compat still reads migrations at diff level
+    - "**/*.db"
+    - "requirements.txt"
+  # The registry is the naming authority — resolution and verification decide
+  # what an agent identity is allowed to claim.
+  strict:
+    - "app/auth.py"
+    - "app/admin_auth.py"
+    - "app/admin.py"
+    - "app/verification.py"
+    - "app/assurance.py"
+    - "app/resolver.py"
+    - "app/config.py"
+
+limits:
+  max_inline_comments: 15
+  max_diff_lines: 4000
+
+model: ""

@@ -1,0 +1,98 @@
+name: Argus Review
+
+# Argus PR reviewer (TRUS-1647) — vendored under .argus/ (from karlmehta/argus@v1).
+# Reviews across security, data-protection, correctness, concurrency, performance,
+# api-compat, tests, observability, dependencies; posts one severity-ranked review.
+#
+# Posture (owner decision, 2026-09-04): Argus REVIEWS, it does not MERGE.
+#   • clean            -> submits an approving review
+#   • blocker/major    -> requests changes
+#   • never            -> merges anything
+#
+# NO MERGE is enforced in three independent places; keep all three:
+#   1. `gh pr merge` is absent from allowedTools below — Argus has no merge tool.
+#   2. There is no automerge workflow in this repo (the one behind the
+#      aurora-gateway incident was deleted in #528 — do not reintroduce it).
+#   3. Repo-level `allow_auto_merge` is false.
+#
+# Runs automatically on PR open / reopen / ready-for-review, and on demand when
+# anyone with write access comments "@argus". Deliberately NOT on `synchronize`:
+# re-reviewing every push is the cost problem #503 fixed. Push fixes, then comment
+# "@argus" to re-review.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+concurrency:
+  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Never on a bot-authored or bot-invoked PR: claude-code-action hard-fails
+    # with "Workflow initiated by non-human actor", which is what currently turns
+    # every dependabot PR on cosmic-vector into a red X.
+    # Same-repo only — fork PRs cannot read secrets.
+    # Comment path additionally requires write access (author_association).
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.type != 'Bot' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        contains(github.event.comment.body, '@argus'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Argus
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are **Argus**, this repository's automated PR reviewer.
+            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
+
+            1. Read `.argus/prompts/system.md` (persona + hard rules — you never
+               approve merely to clear a gate).
+            2. Read `.argus/config/argus.yml` (enabled skills, severity gate, path
+               skip/strict rules, limits).
+            3. Load each enabled skill from `.argus/skills/<name>.md`.
+            4. Load repo memory: `.argus/memory/conventions.md`,
+               `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
+               Treat accepted-patterns as authoritative — do not re-flag them.
+            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`;
+               read surrounding code before judging.
+            6. Apply each skill, reconcile with memory, dedupe, rank by severity,
+               and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
+            7. Post ONE consolidated review per `.argus/prompts/verdict.md`. This
+               repo's policy, per the `verdict:` block in `.argus/config/argus.yml`:
+                 - Any confirmed `blocker` or `major` -> `gh pr review --request-changes`.
+                 - Zero blocker/major, the change is genuinely clean, and the author
+                   is not a bot -> `gh pr review --approve`. Roll any `minor`/`nit`
+                   into the summary body; they do not withhold the approval.
+               Never approve merely to clear a gate: if you would hesitate as a
+               human reviewer, use `--comment` instead of approving.
+
+            8. You must NOT merge. You have no merge tool and must not ask for one,
+               suggest enabling auto-merge, or tell the author the PR will merge
+               itself. A human merges.
+          claude_args: >-
+            --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
