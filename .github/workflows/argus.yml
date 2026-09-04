@@ -91,11 +91,14 @@ jobs:
         env:
           # Foundry account (Azure AI Foundry / Microsoft.CognitiveServices AIServices).
           ANTHROPIC_FOUNDRY_RESOURCE: aif-trustmodel-qa
-          # Claude Code resolves its model tiers to Foundry DEPLOYMENT names. Both
-          # must exist in the resource above: the reviewer runs on the Sonnet tier,
-          # and the Haiku tier still gets used for small/background calls — leaving
-          # it unset fails those at request time, not at config time.
-          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-4-6
+          # INTERIM (2026-09-04): no Sonnet deployment exists in this Foundry
+          # account yet, so BOTH tiers point at the existing claude-haiku-4-5
+          # deployment. These values are Foundry DEPLOYMENT names, not model
+          # families — Foundry routes on the deployment name, so the "SONNET"
+          # variable naming is just Claude Code's tier alias, not a constraint.
+          # Switch ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-4-6 once that
+          # deployment exists; nothing else needs to change.
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-haiku-4-5
           ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
         with:
           use_foundry: "true"
@@ -128,4 +131,4 @@ jobs:
                suggest enabling auto-merge, or tell the author the PR will merge
                itself. A human merges.
           claude_args: >-
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+            --model claude-haiku-4-5 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
