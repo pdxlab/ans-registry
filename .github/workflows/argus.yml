@@ -1,0 +1,134 @@
+name: Argus Review
+
+# Argus PR reviewer (TRUS-1647) — vendored under .argus/ (from karlmehta/argus@v1).
+#
+# AUTH: Microsoft Foundry via Azure OIDC (Entra workload identity federation).
+# There is no long-lived Anthropic API key anywhere in this workflow — the
+# azure/login step exchanges GitHub's short-lived OIDC token for an Azure token,
+# and claude-code-action calls Foundry with it. Nothing to store or rotate.
+# Uses Actions VARIABLES (vars.*), matching this org's deploy workflows — these
+# are identifiers, not credentials, so they are not secrets:
+#   vars.AZURE_CLIENT_ID_ARGUS     dedicated Argus identity (see note below)
+#   vars.AZURE_TENANT_ID           already set in this repo
+#   vars.AZURE_SUBSCRIPTION_ID_QA  already set in this repo
+#
+# NOTE ON THE IDENTITY: this deliberately does NOT reuse vars.AZURE_CLIENT_ID
+# (the shared `github-actions-pdxlab` app). That app holds Contributor on
+# rg-pdx-prod-centralus, and a federated credential for the `pull_request` event
+# would let ANY same-repo PR mint a token with write access to the prod resource
+# group. Argus only needs to invoke one model, so it gets its own identity with
+# one data action on one Foundry account and nothing else.
+# Reviews across security, data-protection, correctness, concurrency, performance,
+# api-compat, tests, observability, dependencies; posts one severity-ranked review.
+#
+# Posture (owner decision, 2026-09-04): Argus REVIEWS, it does not MERGE.
+#   • clean            -> submits an approving review
+#   • blocker/major    -> requests changes
+#   • never            -> merges anything
+#
+# NO MERGE is enforced in three independent places; keep all three:
+#   1. `gh pr merge` is absent from allowedTools below — Argus has no merge tool.
+#   2. There is no automerge workflow in this repo (the one behind the
+#      aurora-gateway incident was deleted in #528 — do not reintroduce it).
+#   3. Repo-level `allow_auto_merge` is false.
+#
+# Runs automatically on PR open / reopen / ready-for-review, and on demand when
+# anyone with write access comments "@argus". Deliberately NOT on `synchronize`:
+# re-reviewing every push is the cost problem #503 fixed. Push fixes, then comment
+# "@argus" to re-review.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write        # required: azure/login OIDC token exchange
+
+concurrency:
+  group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Never on a bot-authored or bot-invoked PR: claude-code-action hard-fails
+    # with "Workflow initiated by non-human actor", which is what currently turns
+    # every dependabot PR on cosmic-vector into a red X.
+    # Same-repo only — fork PRs cannot read secrets.
+    # Comment path additionally requires write access (author_association).
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+        github.actor != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.type != 'Bot' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+        contains(github.event.comment.body, '@argus'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure login (OIDC — no stored credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_ARGUS }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_QA }}
+
+      - name: Run Argus
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Foundry account (Azure AI Foundry / Microsoft.CognitiveServices AIServices).
+          ANTHROPIC_FOUNDRY_RESOURCE: aif-trustmodel-qa
+          # INTERIM (2026-09-04): no Sonnet deployment exists in this Foundry
+          # account yet, so BOTH tiers point at the existing claude-haiku-4-5
+          # deployment. These values are Foundry DEPLOYMENT names, not model
+          # families — Foundry routes on the deployment name, so the "SONNET"
+          # variable naming is just Claude Code's tier alias, not a constraint.
+          # Switch ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-4-6 once that
+          # deployment exists; nothing else needs to change.
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-haiku-4-5
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+        with:
+          use_foundry: "true"
+          prompt: |
+            You are **Argus**, this repository's automated PR reviewer.
+            Review pull request #${{ github.event.pull_request.number || github.event.issue.number }}.
+
+            1. Read `.argus/prompts/system.md` (persona + hard rules — you never
+               approve merely to clear a gate).
+            2. Read `.argus/config/argus.yml` (enabled skills, severity gate, path
+               skip/strict rules, limits).
+            3. Load each enabled skill from `.argus/skills/<name>.md`.
+            4. Load repo memory: `.argus/memory/conventions.md`,
+               `.argus/memory/accepted-patterns.md`, relevant `.argus/memory/knowledge/*`.
+               Treat accepted-patterns as authoritative — do not re-flag them.
+            5. `gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }}`;
+               read surrounding code before judging.
+            6. Apply each skill, reconcile with memory, dedupe, rank by severity,
+               and calibrate (cut low-confidence findings) per `.argus/prompts/review.md`.
+            7. Post ONE consolidated review per `.argus/prompts/verdict.md`. This
+               repo's policy, per the `verdict:` block in `.argus/config/argus.yml`:
+                 - Any confirmed `blocker` or `major` -> `gh pr review --request-changes`.
+                 - Zero blocker/major, the change is genuinely clean, and the author
+                   is not a bot -> `gh pr review --approve`. Roll any `minor`/`nit`
+                   into the summary body; they do not withhold the approval.
+               Never approve merely to clear a gate: if you would hesitate as a
+               human reviewer, use `--comment` instead of approving.
+
+            8. You must NOT merge. You have no merge tool and must not ask for one,
+               suggest enabling auto-merge, or tell the author the PR will merge
+               itself. A human merges.
+          claude_args: >-
+            --model claude-haiku-4-5 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
