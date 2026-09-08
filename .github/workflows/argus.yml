@@ -91,6 +91,10 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_QA }}
 
+      - name: Record start time
+        id: argus_start
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Run Argus
         uses: anthropics/claude-code-action@v1
         env:
@@ -135,3 +139,35 @@ jobs:
                itself. A human merges.
           claude_args: >-
             --model claude-sonnet-4-6 --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh pr comment:*),Read,Grep,Glob"
+
+      # A green "Argus Review" check is not proof a review happened. That has
+      # bitten three separate ways (TRUS-1955): an approval with an empty body,
+      # a stub review pointing at a separate comment, and a run that finished
+      # clean and posted nothing at all. Each time the only signal was green.
+      # Turn a silent no-review into a red check.
+      #
+      # Exception: claude-code-action refuses to run when argus.yml differs from
+      # the copy on the default branch, so a PR that edits argus.yml legitimately
+      # gets no review. Skip the guard there instead of always failing it.
+      - name: Fail if Argus posted no review
+        if: always() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          SINCE: ${{ steps.argus_start.outputs.ts }}
+        run: |
+          set -euo pipefail
+          if gh pr diff "$PR" --name-only | grep -qx '.github/workflows/argus.yml'; then
+            echo "::notice::This PR edits argus.yml, so claude-code-action will not run. No review expected."
+            exit 0
+          fi
+          n=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+                | jq --arg since "$SINCE" '[.[]
+                    | select(.user.login == "claude[bot]")
+                    | select(.submitted_at >= $since)
+                    | select((.body | length) > 0)] | length')
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "::error::Argus finished but posted no review with a body on #$PR. See TRUS-1955."
+            exit 1
+          fi
+          echo "Argus posted $n review(s) with a body on #$PR."
