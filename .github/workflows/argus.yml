@@ -52,7 +52,12 @@ permissions:
 
 concurrency:
   group: argus-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  # Cancel only superseded pull_request runs. NOT for issue_comment: Argus
+  # posting its own review fires a new issue_comment event, and because this
+  # concurrency group is workflow-level while the bot guard is a job-level
+  # `if:`, that run joins the group and cancels the still-finishing original
+  # BEFORE the guard can skip it — silently losing a completed review.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   review:
