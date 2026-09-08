@@ -1,4 +1,4 @@
-# Argus config — ans-registry (FastAPI + SQLAlchemy/Alembic). Vendored from karlmehta/argus@v1.
+# Argus config — ans-registry (FastAPI + SQLModel/Alembic). Vendored from karlmehta/argus@v1.
 
 version: 1
 
