@@ -30,8 +30,22 @@ name: Commit messages
 
 on:
   pull_request:
-    # `edited` matters: the PR title is what a squash merge uses, so retitling
-    # a PR has to re-run this or a fixed title would stay red.
+    # MEASURED, 2026-09-09 — do not assume, this was tested:
+    #   opened       fires
+    #   synchronize  fires (within 20s of a push)
+    #   edited       DID NOT FIRE, in two separate 3-minute tests
+    #
+    # So a PR retitled after a green run is NOT re-validated. `edited` is
+    # left in the list in case GitHub's behaviour differs once this file is
+    # on the base branch, but NOTHING HERE MAY DEPEND ON IT.
+    #
+    # The cost is bounded by the repo's squash setting, and all eight repos
+    # use COMMIT_OR_PR_TITLE: a single-commit PR takes its squash subject
+    # from the COMMIT, which is re-checked on every push, so the title gap
+    # cannot bite there. The residual hole is narrow and deliberate — a
+    # MULTI-commit PR, retitled after CI passes, merged with no further
+    # push. This is an anti-accident guard, not a control against someone
+    # deliberately working around it.
     types: [opened, edited, synchronize, reopened]
 
 permissions:
