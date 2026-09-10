@@ -33,7 +33,10 @@ fi
 is_generated() {
   [[ "$1" =~ ^Merge\ (pull\ request|branch|remote-tracking) ]] ||
   [[ "$1" =~ ^Revert\ \" ]] ||
-  [[ "$1" =~ ^(Bump|bump)\ [a-z@] ]]
+  # [A-Za-z@], not [a-z@]: the Python repos bump Django, Pillow, Jinja2 and
+  # PyYAML, all capitalised. Bots are author-exempt, so this only bit a human
+  # branch carrying a bump commit through a rebase or cherry-pick.
+  [[ "$1" =~ ^(Bump|bump)\ [A-Za-z@] ]]
 }
 
 failed=0
@@ -55,7 +58,29 @@ fi
 # ── the individual commits (what a merge commit preserves) ───────────────
 # base.sha is the merge-base recorded on the PR, so this is exactly the set of
 # commits the PR adds — not everything since main moved.
-mapfile -t SUBJECTS < <(git log --no-merges --format='%s' "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null)
+#
+# FAIL CLOSED. This was `mapfile -t SUBJECTS < <(git log ... 2>/dev/null)`,
+# which PASSED when git failed: stderr was discarded, SUBJECTS came back
+# empty, and an empty list is indistinguishable from "a PR with no non-merge
+# commits" — so the check reported success having inspected nothing. Now that
+# `commit-message` is headed for required_status_checks, a gate that goes
+# green because it could not read the history fails in the worst direction.
+#
+# The shape matters: `mapfile < <(git log)` CANNOT detect this, because
+# mapfile's exit status reflects reading the fd, not the producer's status.
+# Command substitution is what propagates git's failure.
+GIT_ERR=$(mktemp)
+trap 'rm -f "$GIT_ERR"' EXIT
+
+if ! RANGE=$(git log --no-merges --format='%s' "${BASE_SHA}..${HEAD_SHA}" 2>"$GIT_ERR"); then
+  echo "::error::could not read ${BASE_SHA}..${HEAD_SHA} — refusing to pass a check that inspected nothing: $(tr '\n' ' ' < "$GIT_ERR" | head -c 200)"
+  exit 2
+fi
+
+# An empty range is legitimate (a PR of nothing but merge commits), but
+# `mapfile <<< ""` yields one empty element, so guard rather than filter.
+SUBJECTS=()
+[ -n "$RANGE" ] && mapfile -t SUBJECTS <<< "$RANGE"
 
 if [ "${#SUBJECTS[@]}" -eq 0 ]; then
   echo "  (no non-merge commits to check)"
@@ -78,20 +103,8 @@ if [ "$failed" -eq 0 ]; then
   exit 0
 fi
 
-# THE ANNOTATION LEVEL MUST MATCH WHETHER THIS ACTUALLY BLOCKS.
-#
-# The first version emitted ::error:: in both modes, so an advisory run
-# showed contributors a red annotation labelled "error" directly beside a
-# line saying it does not block. Mixed signals like that are precisely how a
-# check earns being ignored, which defeats the point of having it.
-if [ "$MODE" = "style" ]; then
-  HEADING="### ⚠️ Commit messages are missing $WANT"
-else
-  HEADING="### ❌ Commit messages need $WANT"
-fi
-
 {
-  echo "$HEADING"
+  echo "### ❌ Commit messages need $WANT"
   echo
   echo "Fix the **PR title** (used by squash merge) and any commit subject listed \`MISSING\` above."
   echo
@@ -105,8 +118,7 @@ fi
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 if [ "$MODE" = "style" ]; then
-  echo "::warning::Subjects missing $WANT — ADVISORY, this does not block the merge. Expected e.g. $EXAMPLE"
-else
-  echo "::error::Subjects missing $WANT. Expected e.g. $EXAMPLE"
+  echo "::warning::Advisory only — this does not block the merge."
 fi
+echo "::error::Subjects missing $WANT. Expected e.g. $EXAMPLE"
 exit 1
