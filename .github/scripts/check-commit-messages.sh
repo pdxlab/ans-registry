@@ -103,8 +103,24 @@ if [ "$failed" -eq 0 ]; then
   exit 0
 fi
 
+# THE ANNOTATION LEVEL MUST MATCH WHETHER THIS ACTUALLY BLOCKS.
+#
+# An advisory run that annotates with ::error:: shows contributors a red
+# annotation labelled "error" directly beside a line saying it does not
+# block. Mixed signals like that are precisely how a check earns being
+# ignored, which defeats the point of having it.
+#
+# This has now been reverted once by a patch based on the wrong branch, so
+# if you are editing near here: `style` warns, `ticket` errors, and the two
+# must not converge.
+if [ "$MODE" = "style" ]; then
+  HEADING="### ⚠️ Commit messages are missing $WANT"
+else
+  HEADING="### ❌ Commit messages need $WANT"
+fi
+
 {
-  echo "### ❌ Commit messages need $WANT"
+  echo "$HEADING"
   echo
   echo "Fix the **PR title** (used by squash merge) and any commit subject listed \`MISSING\` above."
   echo
@@ -118,7 +134,8 @@ fi
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 if [ "$MODE" = "style" ]; then
-  echo "::warning::Advisory only — this does not block the merge."
+  echo "::warning::Subjects missing $WANT — ADVISORY, this does not block the merge. Expected e.g. $EXAMPLE"
+else
+  echo "::error::Subjects missing $WANT. Expected e.g. $EXAMPLE"
 fi
-echo "::error::Subjects missing $WANT. Expected e.g. $EXAMPLE"
 exit 1
