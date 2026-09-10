@@ -1,0 +1,89 @@
+name: Commit messages
+
+# WHY THIS EXISTS
+# ---------------
+# The prod release announcer (pdxlab/release-announce) turns what shipped into
+# a Slack message, and it can only link a change to its Jira ticket if the
+# ticket ref is IN the subject line. Without a ref the entry still appears, but
+# as bare prose with nothing to click through to.
+#
+# WHAT IS CHECKED, AND WHERE
+# --------------------------
+# Both the PR title AND the individual commit subjects, because which one
+# reaches `main` depends on the merge button:
+#
+#   squash merge  -> the commit subject is the PR TITLE
+#   merge commit  -> the individual COMMIT SUBJECTS survive
+#
+# Every repo here uses both, so checking only one would leave a hole.
+#
+# TWO JOBS, ONLY ONE OF WHICH BLOCKS
+# ----------------------------------
+#   commit-message        ticket ref. BLOCKING (in required_status_checks).
+#                         ~76% of commits already comply.
+#   commit-message-style  conventional type prefix. ADVISORY — it goes red on
+#                         the PR but is deliberately NOT a required check,
+#                         because only ~16% of commits comply today and
+#                         gating it would stop all work. Flip it to required
+#                         once adoption is up; that is the change that lets
+#                         the announcer split features from fixes.
+
+on:
+  pull_request:
+    # MEASURED, 2026-09-09 — do not assume, this was tested:
+    #   opened       fires
+    #   synchronize  fires (within 20s of a push)
+    #   edited       DID NOT FIRE, in two separate 3-minute tests
+    #
+    # So a PR retitled after a green run is NOT re-validated. `edited` is
+    # left in the list in case GitHub's behaviour differs once this file is
+    # on the base branch, but NOTHING HERE MAY DEPEND ON IT.
+    #
+    # The cost is bounded by the repo's squash setting, and all eight repos
+    # use COMMIT_OR_PR_TITLE: a single-commit PR takes its squash subject
+    # from the COMMIT, which is re-checked on every push, so the title gap
+    # cannot bite there. The residual hole is narrow and deliberate — a
+    # MULTI-commit PR, retitled after CI passes, merged with no further
+    # push. This is an anti-accident guard, not a control against someone
+    # deliberately working around it.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-message:
+    name: commit-message
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Every subject must name a ticket
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/check-commit-messages.sh ticket
+
+  commit-message-style:
+    # The displayed name carries "(advisory)" so the checks list says why it
+    # is red without anyone opening the run. Safe to rename because this job
+    # is deliberately NOT in required_status_checks — unlike `commit-message`
+    # above, whose name IS the context the ruleset keys on.
+    name: commit-message-style (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Conventional type prefix (advisory, not required to merge)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/check-commit-messages.sh style
