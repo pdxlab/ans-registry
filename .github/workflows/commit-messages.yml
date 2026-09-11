@@ -68,6 +68,20 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/check-commit-messages.sh ticket
 
+  # Guards the guard. Every case in the test file is a bug that actually
+  # shipped and was caught by a person in review, not by CI — including one
+  # that shipped, was fixed, and then came back via a patch built on the wrong
+  # branch. Deliberately NOT in required_status_checks: it is a signal that
+  # the checker is broken, which is worth seeing, but gating on it would mean
+  # a third required check on repos that do not yet have the first one.
+  commit-message-selftest:
+    name: commit-message-selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the checker still behaves
+        run: bash .github/scripts/check-commit-messages.test.sh
+
   commit-message-style:
     # The displayed name carries "(advisory)" so the checks list says why it
     # is red without anyone opening the run. Safe to rename because this job
