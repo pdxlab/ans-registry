@@ -419,7 +419,20 @@ def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_
         "display_name": agent.display_name,
         "registrant_org": agent.owner_org,
         "registrant_domain": agent.owner_domain,
-        "registrant_email": agent.owner_email,
+        # TRUS-2001: `registrant_email` deliberately NOT returned. This endpoint
+        # is unauthenticated, so publishing it made a named person's email
+        # address retrievable by anyone who knows or guesses an ANS name — and
+        # names are enumerable by design (see /ans/typosquats). Organisation and
+        # domain carry the identity signal a verifier actually needs.
+        #
+        # It was also the first step of an ownership-takeover chain: POST
+        # /ans/transfer accepts `from_email == owner_email` as its only proof of
+        # ownership, so publishing the email handed out that proof. Removing it
+        # narrows the chain but does not close it — the transfer flow needs its
+        # own fix, tracked separately.
+        #
+        # Admins can still see the address (app/admin.py, behind
+        # get_current_admin) and it is unchanged at rest.
         "verified": agent.verified,
         "assurance_tier": agent.assurance_tier,  # unverified | DV | OV
         "verification_method": agent.verification_method if agent.verified else None,
