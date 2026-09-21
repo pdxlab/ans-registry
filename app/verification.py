@@ -66,43 +66,46 @@ def calculate_trust_score(agent_type: str, verified: bool, capabilities: str,
     Full evaluation requires the TrustModel evaluation engine (separate service).
     This is a lightweight estimate based on registration data.
     """
-    score = 5.0  # base
+    # Scored on the platform-wide 0-100 TrustScore scale (same scale the gateway
+    # Trust Index uses). This is a lightweight registration-time estimate; a full
+    # evaluation comes from the TrustModel evaluation engine (separate service).
+    score = 50.0  # base
 
     # Verification boost
     if verified:
-        score += 1.5
+        score += 15
 
     # Source code available
     if source_url and ("github.com" in source_url or "gitlab.com" in source_url):
-        score += 1.0
+        score += 10
 
     # Description quality
     if len(description) > 100:
-        score += 0.5
+        score += 5
 
     # Agent type risk adjustment
     type_adjustments = {
         "mcp_server": 0,
-        "standalone": -0.5,
-        "browser": -0.3,
-        "api": 0.2,
+        "standalone": -5,
+        "browser": -3,
+        "api": 2,
     }
     score += type_adjustments.get(agent_type, 0)
 
     # Capability count (more tools = more risk)
     tool_count = len([c for c in capabilities.split(",") if c.strip()])
     if tool_count <= 3:
-        score += 0.5
+        score += 5
     elif tool_count > 10:
-        score -= 0.5
+        score -= 5
 
-    score = round(min(10.0, max(1.0, score)), 1)
+    score = round(min(100.0, max(10.0, score)))
 
-    if score >= 8.0:
+    if score >= 80:
         tier = "Highly Trusted"
-    elif score >= 6.0:
+    elif score >= 60:
         tier = "Generally Safe"
-    elif score >= 4.0:
+    elif score >= 40:
         tier = "Use With Caution"
     else:
         tier = "High Risk"

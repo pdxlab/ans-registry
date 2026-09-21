@@ -133,7 +133,7 @@ def admin_overview(request: Request, session: Session = Depends(get_session)):
         <div class="stat"><div class="num">{round(avg_score, 1)}</div><div class="label">Avg TrustScore</div></div>
         <div class="stat"><div class="num">{orphans}</div><div class="label">Orphan Risk</div></div>
         <div class="stat"><div class="num">{len(transfers)}</div><div class="label">Total Transfers</div></div>
-        <div class="stat"><div class="num">{len([a for a in agents if a.trust_score and a.trust_score >= 8.0])}</div><div class="label">Highly Trusted</div></div>
+        <div class="stat"><div class="num">{len([a for a in agents if a.trust_score and a.trust_score >= 80])}</div><div class="label">Highly Trusted</div></div>
     </div>
 
     <div class="card">
@@ -160,7 +160,7 @@ def admin_agents(request: Request, session: Session = Depends(get_session)):
     rows = ""
     for a in agents:
         v_badge = '<span class="badge badge-green">✓</span>' if a.verified else '<span class="badge badge-grey">✗</span>'
-        tier_class = "badge-green" if a.trust_score and a.trust_score >= 8.0 else "badge-yellow" if a.trust_score and a.trust_score >= 6.0 else "badge-red"
+        tier_class = "badge-green" if a.trust_score and a.trust_score >= 80 else "badge-yellow" if a.trust_score and a.trust_score >= 60 else "badge-red"
         rows += f"""<tr>
             <td><a href="/ans/lookup/{a.ans_name}" target="_blank"><strong>{a.ans_name}</strong></a></td>
             <td>{a.display_name}</td>
