@@ -101,6 +101,19 @@ check "keeps state, cron, role and launch type" 'DISABLED|cron(*/5 * ? * * *)|ar
 check "drops output-only fields" "false false false" \
   "$(jq -r '"\(has("Arn")) \(has("CreationDate")) \(has("LastModificationDate"))"' <<<"$out")"
 
+# --- update_schedules --------------------------------------------------------
+
+# A separate bash, so `set -e` behaves as it does in a real run.
+denied=$(bash -c '
+  source ./ecs-deploy.sh
+  aws() { echo "AccessDeniedException" >&2; return 254; }
+  declare -A arns=([job]="arn:aws:ecs:us-east-1:123:task-definition/job:2")
+  update_schedules arns
+  echo "continued after a failed listing"
+' 2>&1) && rc=0 || rc=$?
+check "stops when the schedules can't be listed" "1 no" \
+  "$rc $(grep -q 'continued after' <<<"$denied" && echo yes || echo no)"
+
 echo
 if ((failures > 0)); then
   echo "$failures test(s) failed"

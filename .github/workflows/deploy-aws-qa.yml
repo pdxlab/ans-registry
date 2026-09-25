@@ -52,6 +52,7 @@ jobs:
             job_families: ""
             migrate_command: ''
             github_token_build_arg: false
+            repoint_schedules: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,4 +109,5 @@ jobs:
           SERVICE: ${{ matrix.service }}
           JOB_FAMILIES: ${{ matrix.job_families }}
           MIGRATE_COMMAND: ${{ matrix.migrate_command }}
+          REPOINT_SCHEDULES: ${{ matrix.repoint_schedules }}
         run: bash deploy/aws/ecs-deploy.sh

@@ -56,6 +56,7 @@ jobs:
             job_families: ""
             migrate_command: ''
             github_token_build_arg: false
+            repoint_schedules: "true"
     steps:
       - name: Guard
         env:
@@ -130,4 +131,5 @@ jobs:
           SERVICE: ${{ matrix.service }}
           JOB_FAMILIES: ${{ matrix.job_families }}
           MIGRATE_COMMAND: ${{ matrix.migrate_command }}
+          REPOINT_SCHEDULES: ${{ matrix.repoint_schedules }}
         run: bash deploy/aws/ecs-deploy.sh

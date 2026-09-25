@@ -21,6 +21,8 @@
 #   JOB_FAMILIES     space-separated task definition families for this image
 #   MIGRATE_COMMAND  JSON array, e.g. ["python","manage.py","migrate","--no-input"]
 #   WAIT_TIMEOUT_S   how long to wait for the service rollout (default 900)
+#   REPOINT_SCHEDULES  "false" skips step 5, for job families that no schedule
+#                    runs (default "true")
 set -euo pipefail
 
 : "${CLUSTER:?CLUSTER is required}"
@@ -29,6 +31,7 @@ SERVICE="${SERVICE:-}"
 JOB_FAMILIES="${JOB_FAMILIES:-}"
 MIGRATE_COMMAND="${MIGRATE_COMMAND:-}"
 WAIT_TIMEOUT_S="${WAIT_TIMEOUT_S:-900}"
+REPOINT_SCHEDULES="${REPOINT_SCHEDULES:-true}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 log() { echo "==> $*"; }
@@ -165,7 +168,11 @@ wait_for_service() {
 # with only the task definition changed (state, cron and retry are kept).
 update_schedules() {
   local -n new_arns="$1"
-  local group name current family
+  local listing group name current family
+  # Fetched up front: a failure inside the `< <(...)` below would not stop
+  # the script, and the schedules would silently stay on the old revision.
+  listing=$(aws scheduler list-schedules --output json) ||
+    fail "could not list EventBridge schedules, so none were repointed"
   while read -r group name; do
     [[ -n "$name" ]] || continue
     current=$(aws scheduler get-schedule --group-name "$group" --name "$name" --output json)
@@ -175,7 +182,7 @@ update_schedules() {
     aws scheduler update-schedule \
       --cli-input-json "$(render_schedule "$current" "${new_arns[$family]}")" \
       --output text >/dev/null
-  done < <(aws scheduler list-schedules --output json | jq -r '.Schedules[] | "\(.GroupName) \(.Name)"')
+  done < <(jq -r '.Schedules[] | "\(.GroupName) \(.Name)"' <<<"$listing")
 }
 
 # render_schedule <get-schedule JSON> <task definition ARN>
@@ -214,7 +221,9 @@ main() {
       log "Registered ${job_arns[$job]}"
       echo "- Job \`${job_arns[$job]##*/}\`" >>"$SUMMARY"
     done
-    update_schedules job_arns
+    if [[ "$REPOINT_SCHEDULES" == "true" ]]; then
+      update_schedules job_arns
+    fi
   fi
 }
 
