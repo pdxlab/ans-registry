@@ -1,0 +1,133 @@
+# Deploy ans-registry to the AWS Prod environment: the prod account (trm-prd-workload).
+#
+# Builds this repo's image, pushes it to ECR and rolls it out on ECS/Fargate.
+# Sibling to the Azure and GCP deploy workflows, which it does not touch.
+# Alembic migrations run in the container entrypoint (start.sh), as on Azure.
+#
+# Auth: GitHub OIDC into account 957965645300 through this repo's deploy role. The role
+# only trusts jobs running in this repo's `aws-prod` environment.
+#
+# Rollout (deploy/aws/ecs-deploy.sh): each task definition is re-registered
+# from its latest ACTIVE revision with only the image changed. Env vars and
+# secret references stay as the infrastructure defines them.
+#
+# ECR tags are immutable. Re-running the same commit reuses the image already
+# pushed instead of failing on the tag.
+name: Deploy AWS Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-aws-prod" to confirm'
+        required: true
+
+concurrency:
+  group: deploy-aws-prod
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "957965645300"
+  CLUSTER: trm-prd-workload-ecs-cluster
+  DEPLOY_ROLE_ARN: arn:aws:iam::957965645300:role/github-actions/trm-ans-registry-access-oidc-access-iam-role
+
+jobs:
+  deploy:
+    name: deploy ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    environment: aws-prod
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      # One image at a time, so a failure stops before the next one ships.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - name: ans-registry
+            dockerfile: Dockerfile
+            ecr_repository: trm-prd-ans-registry-ecr-repo
+            service: "trm-prd-ans-registry-service"
+            job_families: ""
+            migrate_command: ''
+            github_token_build_arg: false
+    steps:
+      - name: Guard
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [[ "$CONFIRM" != "deploy-aws-prod" ]]; then
+            echo "::error::Type 'deploy-aws-prod' in the confirm input."
+            exit 1
+          fi
+          # Prod ships only reviewed code: main, or a release tag cut from it.
+          if [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::Prod deploys run from main or a v* tag, not $GITHUB_REF."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          role-session-name: gha-${{ github.run_id }}-${{ matrix.name }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Build and push image
+        id: image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ matrix.ecr_repository }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          PASS_GITHUB_TOKEN: ${{ matrix.github_token_build_arg }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="prod-$(git rev-parse --short=7 HEAD)"
+          fi
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "Image $ECR_REPOSITORY:$TAG already exists; reusing it."
+          else
+            BUILD_ARGS=()
+            if [[ "$PASS_GITHUB_TOKEN" == "true" ]]; then
+              BUILD_ARGS+=(--build-arg "GITHUB_TOKEN=$GHCR_TOKEN")
+            fi
+            docker build "${BUILD_ARGS[@]}" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              -f "$DOCKERFILE" -t "$ECR_REGISTRY/$ECR_REPOSITORY:$TAG" .
+            docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$TAG"
+          fi
+          DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "- \`$ECR_REPOSITORY:$TAG\` → \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test the deploy script
+        run: bash deploy/aws/ecs-deploy.test.sh
+
+      - name: Roll out on ECS
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SERVICE: ${{ matrix.service }}
+          JOB_FAMILIES: ${{ matrix.job_families }}
+          MIGRATE_COMMAND: ${{ matrix.migrate_command }}
+        run: bash deploy/aws/ecs-deploy.sh
