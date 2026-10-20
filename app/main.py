@@ -12,8 +12,8 @@ Endpoints:
   POST /ans/a2a/verify       — Agent-to-agent verification
   GET  /ans/typosquats/{name}— Typosquat candidates targeting a name
   GET  /ans/orphans          — Orphaned / orphan-risk names
-  POST /ans/transfer         — Initiate ownership transfer
-  POST /ans/transfer/accept  — Accept a transfer
+  POST /ans/transfer         — Initiate ownership transfer — admin only
+  POST /ans/transfer/accept  — Accept a transfer — admin only
   GET  /ans/search           — Search agents
   GET  /ans/directory        — Public directory of AgentCert-certified agents
   GET  /ans/stats            — Registry statistics
@@ -702,8 +702,20 @@ def org_validate_agent(
 
 
 @app.post("/ans/transfer")
-def initiate_transfer(req: TransferRequest, session: Session = Depends(get_session)):
-    """Initiate ownership transfer — like a domain transfer."""
+def initiate_transfer(
+    req: TransferRequest,
+    admin: AdminUser = Depends(require_admin),
+    session: Session = Depends(get_session),
+):
+    """
+    Initiate ownership transfer — like a domain transfer. Admin only (TRUS-2006).
+
+    This used to be public, with `from_email == owner_email` as the only proof
+    of ownership, and it returned the transfer token to the caller — so anyone
+    who knew or guessed an owner's address could take any name. An email is an
+    identifier, not an authenticator. Until a real owner-proof flow exists,
+    transfers are a support action performed by an admin.
+    """
 
     agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
     if not agent:
@@ -727,6 +739,12 @@ def initiate_transfer(req: TransferRequest, session: Session = Depends(get_sessi
     session.commit()
     session.refresh(transfer)
 
+    # Audit trail: which admin moved which name. No owner emails in the log.
+    logger.info(
+        "ANS transfer initiated",
+        extra={"admin_id": admin.id, "ans_name": agent.ans_name, "transfer_id": transfer.id},
+    )
+
     return {
         "status": "pending",
         "transfer_id": transfer.id,
@@ -738,8 +756,12 @@ def initiate_transfer(req: TransferRequest, session: Session = Depends(get_sessi
 
 
 @app.post("/ans/transfer/accept")
-def accept_transfer(req: TransferAcceptRequest, session: Session = Depends(get_session)):
-    """Accept an ownership transfer — new owner confirms."""
+def accept_transfer(
+    req: TransferAcceptRequest,
+    admin: AdminUser = Depends(require_admin),
+    session: Session = Depends(get_session),
+):
+    """Accept an ownership transfer — new owner confirms. Admin only (TRUS-2006)."""
 
     transfer = session.exec(
         select(Transfer).where(
@@ -772,6 +794,11 @@ def accept_transfer(req: TransferAcceptRequest, session: Session = Depends(get_s
     session.add(agent)
     session.add(transfer)
     session.commit()
+
+    logger.info(
+        "ANS transfer completed",
+        extra={"admin_id": admin.id, "ans_name": agent.ans_name, "transfer_id": transfer.id},
+    )
 
     return {
         "status": "completed",

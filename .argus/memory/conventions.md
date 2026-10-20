@@ -16,12 +16,16 @@
   lookup is `GET /ans/lookup/{ans_name}` in `main.py`. Don't conflate the two.
 
 ## The API is public by design — do NOT flag missing auth on it
-- Of the routes in `app/main.py`, **only `POST /ans/verify/org` takes an auth
-  dependency** (`Depends(require_admin)`). Everything else — `register`, `lookup`,
-  `resolve`, `whois`, `search`, `directory`, `stats`, `cert`, `typosquats`,
-  `orphans`, `a2a/verify`, `verify`, `transfer` — is **intentionally
-  unauthenticated**, because a public registry has to be readable and registrable
-  by anyone.
+- Of the routes in `app/main.py`, **only `POST /ans/verify/org`, `POST /ans/transfer`
+  and `POST /ans/transfer/accept` take an auth dependency** (`Depends(require_admin)`).
+  Everything else — `register`, `lookup`, `resolve`, `whois`, `search`, `directory`,
+  `stats`, `cert`, `typosquats`, `orphans`, `a2a/verify`, `verify` — is
+  **intentionally unauthenticated**, because a public registry has to be readable
+  and registrable by anyone.
+- Transfer was public until TRUS-2006: the owner email was its only proof and the
+  token came back to the caller, so anyone could take any name. Making either
+  transfer route public again, or returning a transfer token to an unauthenticated
+  caller, is a `blocker`.
 - A new route with no auth dependency is therefore **not** a finding on its own.
   It is a finding only if it exposes admin data, mutates another owner's record,
   or leaks something the public routes don't already expose.
@@ -42,7 +46,8 @@
 ## Ownership is asserted, not proven — the real invariant
 - Mutations authorise by **comparing an email supplied in the request body** to the
   stored owner, in-handler: `agent.owner_email.lower() != req.from_email.lower()`
-  → 403 (see `initiate_transfer`). That is a *claim*, not proof of identity.
+  → 403 (see `initiate_transfer`, which is now also admin-gated because of this).
+  That is a *claim*, not proof of identity.
 - Any new mutation on an existing record **must at minimum replicate that owner
   check** — omitting it is a `blocker`, since it would let anyone edit any name.
 - Proposing to strengthen this (signed proof, emailed confirmation token) is a
