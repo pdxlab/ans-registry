@@ -9,9 +9,6 @@ skills:
   - concurrency
   - performance
   - api-compat
-  - tests
-  - observability
-  - dependencies
 
 gate: major
 
