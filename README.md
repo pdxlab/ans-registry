@@ -66,8 +66,9 @@ curl http://localhost:8080/ans/typosquats/my-sales-agent
 # Orphaned / orphan-risk names across the namespace
 curl http://localhost:8080/ans/orphans?min_risk=medium
 
-# Transfer ownership
+# Transfer ownership — admin only (TRUS-2006); owners request it through support
 curl -X POST http://localhost:8080/ans/transfer \
+  -H "X-ANS-Admin-Key: $ANS_ADMIN_KEY" -H "Content-Type: application/json" \
   -d '{"ans_name": "my-sales-agent", "from_email": "ai@acme.com", "to_org": "NewCo", "to_email": "ai@newco.com"}'
 
 # Search registry
