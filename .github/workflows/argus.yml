@@ -159,6 +159,17 @@ jobs:
           pr: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
           repo: ${{ github.repository }}
           github-token: ${{ github.token }}
+          # ONE group: one conversation covering every dimension in sequence.
+          # `parallelism` means NUMBER OF GROUPS on this engine, so a lower
+          # value sends the diff fewer times and costs less. This IS a thinner
+          # review, not a free saving — measured on aurora-gateway#893, 6
+          # dimensions, 3 trials each: parallelism 4 raised 4.3 findings a run,
+          # parallelism 1 raised 1.0. Owner decision (JC, 2026-10-22), taken
+          # because a human code-owner approval is required on every PR here
+          # (TRUS-2364), so Argus is defence in depth rather than the only
+          # gate, and this is what puts every repo inside the budget.
+          # Rollback: raise this value.
+          parallelism: "1"
 
       # A green "Argus Review" check is not proof a review happened. That has
       # bitten three separate ways (TRUS-1955): an approval with an empty body,
