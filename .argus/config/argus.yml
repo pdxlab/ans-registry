@@ -27,7 +27,12 @@ verdict:
   # in the workflow's allowedTools, no automerge workflow in this repo (the one
   # behind the aurora-gateway incident was deleted in #528 — do not reintroduce
   # it), and repo-level allow_auto_merge is false.
-  allow_approve: true
+  # false, not true: GITHUB_TOKEN cannot submit approving reviews unless the
+  # org lets ANY workflow token approve (TRUS-2326, open). Left at true, every
+  # CLEAN PR would raise on `gh pr review --approve`, post nothing, and the
+  # no-review guard would turn it red. Flip this and the action's can-approve
+  # together if that setting ever lands.
+  allow_approve: false
   on_findings: request_changes
   never_approve_authors:
     - "dependabot[bot]"
