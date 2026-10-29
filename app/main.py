@@ -864,6 +864,9 @@ def search_agents(
                 "ans_name": a.ans_name,
                 "owner": a.owner_org,
                 "verified": a.verified,
+                # TRUS-2155: the stored tier, same as /ans/lookup. Callers used
+                # to infer it from `verified`, so an OV name always read as DV.
+                "assurance_tier": a.assurance_tier,
                 "type": a.agent_type,
                 "trust_score": a.trust_score,
                 "trust_tier": a.trust_tier,
