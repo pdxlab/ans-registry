@@ -5,7 +5,7 @@ Endpoint tests for the AgentCert ANS features:
   TRUS-1259 — a2a verify + orphan/typosquat detection
 """
 
-from .conftest import register, verify_email
+from .conftest import register, verify_owner
 
 
 # ── TRUS-1257: registration + assurance tiers ──
@@ -19,9 +19,9 @@ def test_register_starts_unverified(client):
     assert body["typosquat_warning"] is None
 
 
-def test_email_verification_earns_dv(client):
+def test_dns_verification_earns_dv(client):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    resp = verify_email(client, "acme-sales-agent")
+    resp = verify_owner(client, "acme-sales-agent")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "verified"
@@ -41,7 +41,7 @@ def test_org_validation_requires_dv_first(client, admin_key):
 
 def test_org_validation_promotes_to_ov(client, admin_key):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     resp = client.post(
         "/ans/verify/org",
         json={"ans_name": "acme-sales-agent"},
@@ -53,7 +53,7 @@ def test_org_validation_promotes_to_ov(client, admin_key):
 
 def test_org_validation_requires_admin(client):
     register(client, "acme-sales-agent")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     # require_admin raises a 302 redirect to /admin/login when unauthenticated;
     # don't follow it so we observe the auth gate rather than the login page.
     resp = client.post(
@@ -94,7 +94,7 @@ def test_whois_returns_record(client):
 
 def test_whois_agentcert_status_after_verification(client):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     body = client.get("/ans/whois/acme-sales-agent").json()
     assert body["agentcert"]["status"] == "certified (DV)"
 
@@ -111,7 +111,7 @@ def test_a2a_verify_unverified_fails_dv_bar(client):
 
 def test_a2a_verify_passes_when_dv(client):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     resp = client.post(
         "/ans/a2a/verify",
         json={"target_ans_name": "acme-sales-agent", "caller_ans_name": "buyer-bot"},
@@ -123,7 +123,7 @@ def test_a2a_verify_passes_when_dv(client):
 
 def test_a2a_verify_ov_bar_rejects_dv_only(client, admin_key):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     resp = client.post(
         "/ans/a2a/verify",
         json={"target_ans_name": "acme-sales-agent", "min_assurance": "OV"},
@@ -171,7 +171,7 @@ def test_orphans_endpoint_lists_unverified(client):
 
 def test_verified_agent_not_in_orphans(client):
     register(client, "live-agent", owner_email="ai@acme.com")
-    verify_email(client, "live-agent")
+    verify_owner(client, "live-agent")
     resp = client.get("/ans/orphans?min_risk=low")
     names = [o["ans_name"] for o in resp.json()["orphans"]]
     assert "live-agent" not in names
@@ -181,7 +181,7 @@ def test_verified_agent_not_in_orphans(client):
 
 def test_stats_includes_assurance_breakdown(client):
     register(client, "a-agent", owner_email="ai@acme.com")
-    verify_email(client, "a-agent")
+    verify_owner(client, "a-agent")
     resp = client.get("/ans/stats")
     body = resp.json()
     assert body["by_assurance"]["DV"] == 1

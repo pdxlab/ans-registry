@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 from .verification import (
     generate_verification_token,
     check_dns_txt,
-    verify_email_domain,
     calculate_trust_score,
 )
 from .assurance import (
@@ -156,7 +155,8 @@ class A2AVerifyRequest(BaseModel):
 
 class VerifyRequest(BaseModel):
     ans_name: str
-    method: str = "email"  # "dns_txt" | "email"
+    # TRUS-2286: "email" is still accepted but no longer grants DV.
+    method: str = "dns_txt"  # "dns_txt" | "email"
 
 
 class TransferRequest(BaseModel):
@@ -598,7 +598,17 @@ def list_orphans(
 
 @app.post("/ans/verify")
 def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
-    """Verify agent ownership via DNS TXT record or email domain match."""
+    """Verify agent ownership via a DNS TXT record under the claimed domain.
+
+    TRUS-2286: the ``email`` method used to grant DV when the registrant's
+    email domain matched the claimed domain. Both are caller-supplied at
+    registration and this endpoint is unauthenticated, so anyone could
+    register ``x@acme.com`` + ``acme.com`` and "verify" DV for a domain they
+    don't control. Email now grants nothing and answers with the DNS TXT
+    record to publish instead. A DNS check proves control on its own, so it
+    needs no authentication. Agents verified by email before this keep
+    their tier; downgrading them is a separate decision (see the ticket).
+    """
 
     agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
     if not agent:
@@ -618,12 +628,16 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
                 "record": f"_ans-verify.{agent.owner_domain}  TXT  \"{agent.verification_token}\"",
             }
     elif req.method == "email":
-        verified = verify_email_domain(agent.owner_email, agent.owner_domain)
-        if not verified:
-            return {
-                "status": "email_mismatch",
-                "message": f"Email domain '{agent.owner_email.split('@')[-1]}' doesn't match claimed domain '{agent.owner_domain}'.",
-            }
+        # TRUS-2286: a matching email domain proves nothing (both were typed
+        # in at registration). Point at the DNS proof instead.
+        return {
+            "status": "email_not_accepted",
+            "message": (
+                "An email address can't prove you control a domain, so it no longer "
+                "earns DV. Publish this DNS TXT record and verify via DNS:"
+            ),
+            "record": f"_ans-verify.{agent.owner_domain}  TXT  \"{agent.verification_token}\"",
+        }
 
     if verified:
         agent.verified = True
