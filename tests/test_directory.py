@@ -3,7 +3,7 @@ Endpoint tests for the public AgentCert directory:
   TRUS-1284 — GET /ans/directory (list every agent holding an AgentCert)
 """
 
-from .conftest import register, verify_email
+from .conftest import register, verify_owner
 
 
 def test_directory_empty(client):
@@ -38,7 +38,7 @@ def test_directory_lists_certified_agents(client):
 
 def test_directory_reflects_dv_tier_after_verification(client):
     register(client, "acme-sales-agent", owner_email="ai@acme.com")
-    verify_email(client, "acme-sales-agent")
+    verify_owner(client, "acme-sales-agent")
     item = client.get("/ans/directory").json()["items"][0]
     assert item["assurance_tier"] == "DV"
     assert item["agentcert_status"] == "certified (DV)"
@@ -63,7 +63,7 @@ def test_directory_search_by_name_and_org(client):
 def test_directory_sort_by_score_desc_default(client):
     # A verified agent scores higher than an unverified one.
     register(client, "high-agent", owner_email="ai@acme.com")
-    verify_email(client, "high-agent")
+    verify_owner(client, "high-agent")
     register(client, "low-agent", owner_email="ai@acme.com")  # email mismatch → stays unverified
 
     items = client.get("/ans/directory").json()["items"]
@@ -75,7 +75,7 @@ def test_directory_sort_by_score_desc_default(client):
 
 def test_directory_min_score_filter(client):
     register(client, "high-agent", owner_email="ai@acme.com")
-    verify_email(client, "high-agent")
+    verify_owner(client, "high-agent")
     high = client.get("/ans/directory").json()["items"][0]["trust_score"]
 
     # min_score above the only agent's score → no rows.
