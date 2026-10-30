@@ -605,7 +605,15 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="Agent not found.")
 
     if agent.verified:
-        return {"status": "already_verified", "message": "This agent is already verified."}
+        # TRUS-2161: carry the tier and how it was earned, so the console can
+        # label an email-verified name "Organization Verified" rather than
+        # "Domain Validated" without a second lookup.
+        return {
+            "status": "already_verified",
+            "message": "This agent is already verified.",
+            "assurance_tier": agent.assurance_tier,
+            "verification_method": agent.verification_method,
+        }
 
     verified = False
 
@@ -651,6 +659,7 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
             "status": "verified",
             "message": f"Agent '{agent.ans_name}' is now verified. Owner: {agent.owner_org}",
             "assurance_tier": agent.assurance_tier,
+            "verification_method": agent.verification_method,  # TRUS-2161
             "trust_score": score,
             "trust_tier": tier,
             "badge_url": f"https://trustmodel.ai/badge/ans/{agent.ans_name}.svg",
