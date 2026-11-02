@@ -1,5 +1,5 @@
 """
-Agent ownership verification — DNS TXT + email fallback.
+Agent ownership verification — DNS TXT.
 """
 
 import dns.resolver
@@ -38,25 +38,6 @@ def check_dns_txt(domain: str, expected_token: str) -> bool:
     except Exception as e:
         logger.error(f"DNS verification error for {domain}: {e}")
         return False
-
-
-def verify_email_domain(email: str, claimed_domain: str) -> bool:
-    """
-    Simple check: does the email domain match the claimed org domain?
-    e.g., ai-ops@salesforce.com matches salesforce.com
-    """
-    email_domain = email.split("@")[-1].lower()
-    claimed = claimed_domain.lower()
-
-    # Direct match
-    if email_domain == claimed:
-        return True
-
-    # Subdomain match (e.g., engineering.salesforce.com)
-    if email_domain.endswith(f".{claimed}"):
-        return True
-
-    return False
 
 
 def calculate_trust_score(agent_type: str, verified: bool, capabilities: str,

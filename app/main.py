@@ -7,7 +7,7 @@ Endpoints:
   POST /ans/register         — Register a new agent (with org/domain assurance)
   GET  /ans/lookup/{name}    — Look up an agent (WHOIS for agents)
   GET  /ans/whois/{name}     — WHOIS-for-agents record (owner/tier/cert status)
-  POST /ans/verify           — Verify ownership via DNS or email
+  POST /ans/verify           — Verify ownership via a DNS TXT record
   POST /ans/verify/org       — Org-validate (OV tier) — admin only
   POST /ans/a2a/verify       — Agent-to-agent verification
   GET  /ans/typosquats/{name}— Typosquat candidates targeting a name
@@ -287,9 +287,7 @@ def register_agent(req: RegisterRequest, session: Session = Depends(get_session)
     instructions = (
         f"To verify ownership, add this DNS TXT record:\n"
         f"  _ans-verify.{domain}  TXT  \"{token}\"\n\n"
-        f"Or verify via email: call POST /ans/verify with method='email' "
-        f"and we'll check that your email domain matches {domain}.\n\n"
-        f"After verification, your TrustScore will increase and you'll "
+        f"Then call POST /ans/verify. After verification, your TrustScore will increase and you'll "
         f"receive a 'Verified Owner' badge."
     )
 
@@ -608,13 +606,17 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
     record to publish instead. A DNS check proves control on its own, so it
     needs no authentication. Agents verified by email before this keep
     their tier; downgrading them is a separate decision (see the ticket).
+    They can re-verify by DNS, which records ``dns_txt`` as the method, and
+    must before they can be org-validated.
     """
 
     agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
 
-    if agent.verified:
+    # TRUS-2286: a name verified by email may still prove control by DNS.
+    reverify_by_dns = agent.verification_method == "email" and req.method == "dns_txt"
+    if agent.verified and not reverify_by_dns:
         # TRUS-2161: carry the tier and how it was earned, so the console can
         # label an email-verified name "Organization Verified" rather than
         # "Domain Validated" without a second lookup.
@@ -703,6 +705,16 @@ def org_validate_agent(
         raise HTTPException(
             status_code=409,
             detail="Agent must be domain-verified (DV) before it can be org-validated (OV).",
+        )
+    if agent.verification_method == "email":
+        # TRUS-2286: email DV never proved domain control. OV on top of it
+        # would let the gateway mint an OV AgentCert for a spoofed domain.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This agent was verified by email, which doesn't prove domain control. "
+                "It must re-verify via DNS TXT before it can be org-validated (OV)."
+            ),
         )
 
     agent.org_validated = True

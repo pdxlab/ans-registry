@@ -4,8 +4,8 @@ ANS assurance tiers + namespace integrity.
 Two concerns live here:
 
 1. Assurance tiers (TRUS-1257) — the DV/OV-style identity assurance that
-   AgentCert builds on top of. Domain control (DNS TXT or matching email
-   domain) earns DV; an additional manual org review earns OV.
+   AgentCert builds on top of. Domain control (a DNS TXT record) earns DV;
+   an additional manual org review earns OV.
 
 2. Namespace integrity (TRUS-1259) — orphan detection (names whose owners
    have gone dark / can no longer prove control) and typosquat detection
@@ -23,7 +23,8 @@ TIER_DV = "DV"  # domain validated
 TIER_OV = "OV"  # organization validated
 
 # Methods that prove domain control and therefore earn at least DV.
-DOMAIN_CONTROL_METHODS = {"dns_txt", "email"}
+# TRUS-2286: "email" is not one; a matching email domain proves nothing.
+DOMAIN_CONTROL_METHODS = {"dns_txt"}
 
 
 def compute_assurance_tier(verified: bool, verification_method: str,
@@ -32,7 +33,7 @@ def compute_assurance_tier(verified: bool, verification_method: str,
     Derive the assurance tier from verification state.
 
       unverified — no proof of domain control
-      DV         — domain control proven (DNS TXT or matching email domain)
+      DV         — domain control proven (DNS TXT)
       OV         — DV plus a confirmed legal organization (manual review)
     """
     if verified and verification_method in DOMAIN_CONTROL_METHODS:

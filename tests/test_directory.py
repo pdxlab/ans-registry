@@ -64,7 +64,7 @@ def test_directory_sort_by_score_desc_default(client):
     # A verified agent scores higher than an unverified one.
     register(client, "high-agent", owner_email="ai@acme.com")
     verify_owner(client, "high-agent")
-    register(client, "low-agent", owner_email="ai@acme.com")  # email mismatch → stays unverified
+    register(client, "low-agent", owner_email="ai@acme.com")  # never verified → stays unverified
 
     items = client.get("/ans/directory").json()["items"]
     scores = [i["trust_score"] for i in items]

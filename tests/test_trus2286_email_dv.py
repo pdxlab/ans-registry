@@ -11,7 +11,7 @@ from unittest.mock import patch
 from sqlmodel import select
 
 from app.models import Agent
-from tests.conftest import register
+from tests.conftest import register, verified_by_email_before
 
 
 def _agent(session, ans_name):
@@ -82,3 +82,59 @@ def test_an_agent_verified_by_email_before_keeps_its_tier(client, session):
 
     assert resp.json()["status"] == "already_verified"
     assert _agent(session, "legacy-2286-agent").assurance_tier == "DV"
+
+
+def _org_validate(client, admin_key, ans_name):
+    return client.post("/ans/verify/org", json={"ans_name": ans_name}, headers={"X-ANS-Admin-Key": admin_key})
+
+
+def test_a_name_verified_by_email_cannot_be_org_validated(client, session, admin_key):
+    """
+    Scenario: Ankit (#26). A name got DV by email before this change; an
+    admin later org-validates it.
+    Expected: 409 telling it to re-verify via DNS; still DV, not OV. OV would
+    let the gateway mint an OV AgentCert for a domain nobody proved.
+    """
+    register(client, "spoof-ov-2286-agent", owner_email="anyone@victim-2286.example",
+             owner_domain="victim-2286.example")
+    verified_by_email_before(session, "spoof-ov-2286-agent")
+
+    resp = _org_validate(client, admin_key, "spoof-ov-2286-agent")
+
+    assert resp.status_code == 409
+    assert "DNS TXT" in resp.json()["error"]["message"]
+    agent = _agent(session, "spoof-ov-2286-agent")
+    assert (agent.assurance_tier, agent.org_validated) == ("DV", False)
+
+
+def test_a_dns_record_moves_an_email_name_to_dns_and_then_ov_is_allowed(client, session, admin_key):
+    register(client, "reverify-2286-agent", owner_email="ai@acme-2286.example")
+    verified_by_email_before(session, "reverify-2286-agent")
+    token = _agent(session, "reverify-2286-agent").verification_token
+
+    with patch("app.main.check_dns_txt", return_value=True) as dns:
+        resp = client.post("/ans/verify", json={"ans_name": "reverify-2286-agent", "method": "dns_txt"})
+
+    dns.assert_called_once_with("acme-2286.example", token)
+    assert resp.json()["status"] == "verified"
+    assert resp.json()["verification_method"] == "dns_txt"
+    assert _org_validate(client, admin_key, "reverify-2286-agent").json()["assurance_tier"] == "OV"
+
+
+def test_a_failed_dns_check_leaves_an_email_name_as_it_was(client, session):
+    register(client, "keep-2286-agent", owner_email="ai@acme-2286.example")
+    verified_by_email_before(session, "keep-2286-agent")
+
+    with patch("app.main.check_dns_txt", return_value=False):
+        resp = client.post("/ans/verify", json={"ans_name": "keep-2286-agent", "method": "dns_txt"})
+
+    assert resp.json()["status"] == "dns_not_found"
+    agent = _agent(session, "keep-2286-agent")
+    assert (agent.verified, agent.verification_method, agent.assurance_tier) == (True, "email", "DV")
+
+
+def test_registration_points_only_at_dns(client):
+    body = register(client, "register-2286-agent", owner_email="ai@acme-2286.example").json()
+
+    assert "_ans-verify.acme-2286.example" in body["verification_instructions"]
+    assert "email" not in body["verification_instructions"].lower()
