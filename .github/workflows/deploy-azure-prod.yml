@@ -79,6 +79,14 @@ jobs:
         # Secret ref + env var names must match the app's Settings model
         # (see app/config.py) and the ACA secrets provisioned during
         # smoke. Same class of fix as TRUS-1300 on QA.
+        #
+        # ANS_CORS_ORIGINS is a literal, not a repo variable (TRUS-2473).
+        # It used to read `vars.ANS_CORS_ORIGINS_PROD`, which was never
+        # created, so every prod deploy shipped ANS_CORS_ORIGINS="" — an
+        # empty allowlist that rejects every browser preflight from
+        # app.trustmodel.ai. `--replace-env-vars` also wipes any value set
+        # by hand on the container app, so it must live here. Mirrors the
+        # QA workflow, which pins its origins the same way.
         run: |
           az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
             --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
@@ -88,7 +96,7 @@ jobs:
               "WEB_WORKERS=2" \
               "ANS_RUN_AUTO_CREATE=0" \
               "ANS_SESSION_COOKIE_SECURE=true" \
-              "ANS_CORS_ORIGINS=${{ vars.ANS_CORS_ORIGINS_PROD }}" \
+              "ANS_CORS_ORIGINS=https://app.trustmodel.ai" \
               "AURORA_GATEWAY_URL=${{ vars.AURORA_GATEWAY_URL_PROD }}" \
               "AGP_URL=${{ vars.AGP_URL_PROD }}" \
               "ANS_ADMIN_PASSWORD=secretref:ans-admin-password" \

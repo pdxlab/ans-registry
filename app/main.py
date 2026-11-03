@@ -81,15 +81,33 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # for local dev convenience, but in QA/prod set the env var to a comma-
 # separated allowlist. allow_credentials is automatically off when "*" is
 # in the list, per FastAPI/CORS rules (cookies can't ride a wildcard).
-_cors_origins = settings.cors_origin_list
-_cors_allow_credentials = "*" not in _cors_origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=_cors_allow_credentials,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-ANS-Admin-Key"],
-)
+def cors_middleware_kwargs(s) -> dict:
+    """CORSMiddleware config for a Settings object. Shared with the tests so
+    they exercise the exact config this app ships with."""
+    origins = s.cors_origin_list
+    return {
+        "allow_origins": origins,
+        "allow_credentials": "*" not in origins,
+        "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type", "X-ANS-Admin-Key"],
+    }
+
+
+def warn_if_cors_allowlist_empty(s) -> None:
+    """TRUS-2473: an empty allowlist rejects every browser preflight, and it
+    stayed silent in Azure prod for weeks because ANS_CORS_ORIGINS was set to
+    "" by the deploy. Server-to-server callers don't use CORS, so this logs
+    rather than refusing to boot."""
+    if not s.is_development and not s.cors_origin_list:
+        logger.error(
+            "ANS_CORS_ORIGINS is empty in APP_ENV=%s: every browser "
+            "cross-origin request will be rejected",
+            s.app_env,
+        )
+
+
+warn_if_cors_allowlist_empty(settings)
+app.add_middleware(CORSMiddleware, **cors_middleware_kwargs(settings))
 
 
 # Request-id middleware + exception handlers must be installed before any
