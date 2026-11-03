@@ -21,8 +21,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
-from app.config import Settings
-from app.main import cors_middleware_kwargs, warn_if_cors_allowlist_empty
+from app.config import Settings, settings
+from app.main import app, cors_middleware_kwargs, warn_if_cors_allowlist_empty
 
 PROD_ORIGIN = "https://app.trustmodel.ai"
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/deploy-azure-prod.yml"
@@ -87,6 +87,14 @@ def test_prod_workflow_value_passes_real_preflight(monkeypatch):
 
 
 # ── Middleware behaviour ────────────────────────────────────────────────────
+
+def test_app_uses_the_tested_cors_config():
+    """The probe-app tests below only mean something if the real app is wired
+    from the same helper. Fails if app.main hand-writes its CORS kwargs."""
+    cors = [m for m in app.user_middleware if m.cls is CORSMiddleware]
+    assert len(cors) == 1
+    assert cors[0].kwargs == cors_middleware_kwargs(settings)
+
 
 def test_empty_allowlist_rejects_preflight(monkeypatch):
     """Reproduces the prod bug: what ANS_CORS_ORIGINS="" did to the browser."""
