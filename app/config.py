@@ -13,11 +13,24 @@ Source-of-truth precedence on Cloud Run:
 Run-time access: `from app.config import settings`.
 """
 
+import re
 from functools import lru_cache
 from typing import Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# A ``https://*.<base>`` entry in ANS_CORS_ORIGINS allows any single-label
+# subdomain of <base>. Starlette compares ``allow_origins`` by exact string, so
+# such entries are compiled into ``allow_origin_regex`` instead (TRUS-2474).
+# Only https wildcards are recognised; anything else stays a literal and so
+# simply never matches.
+_WILDCARD_PREFIX = "https://*."
+
+
+def _split_origins(raw: str) -> list[str]:
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 class Settings(BaseSettings):
@@ -99,7 +112,30 @@ class Settings(BaseSettings):
         raw = self.ans_cors_origins.strip()
         if raw == "*":
             return ["*"]
-        return [o.strip() for o in raw.split(",") if o.strip()]
+        return [o for o in _split_origins(raw) if not o.startswith(_WILDCARD_PREFIX)]
+
+    @property
+    def cors_origin_regex(self) -> Optional[str]:
+        """Anchored regex covering every ``https://*.<base>`` entry, or None.
+
+        Mirrors aurora-gateway's ``tenant_origin_regexes`` so both services
+        accept the same tenant hosts: https only, exactly one DNS label, and
+        the base domain escaped. The apex and nested subdomains do not match.
+        """
+        raw = self.ans_cors_origins.strip()
+        if raw == "*":
+            return None
+        bases = [
+            o[len(_WILDCARD_PREFIX) :]
+            for o in _split_origins(raw)
+            if o.startswith(_WILDCARD_PREFIX)
+        ]
+        if not bases:
+            return None
+        return "|".join(
+            rf"^https://[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?\.{re.escape(b)}$"
+            for b in bases
+        )
 
 
 @lru_cache(maxsize=1)
