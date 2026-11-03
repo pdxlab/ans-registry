@@ -91,7 +91,15 @@ def cors_middleware_kwargs(s) -> dict:
     return {
         "allow_origins": origins,
         "allow_origin_regex": s.cors_origin_regex,
-        "allow_credentials": "*" not in origins,
+        # Credentials stay off (TRUS-2474). ANS admin authenticates with the
+        # ambient `ans_admin_session` cookie, and SameSite is decided per *site*
+        # — every `*.trustmodel.ai` host is the same site as ANS, so the browser
+        # attaches that cookie itself. Echoing a matched origin with credentials
+        # on would let any tenant subdomain read `/admin/*` as the logged-in
+        # admin. Nothing cross-origin needs them: the console's `ansClient` never
+        # sets `withCredentials`, the admin UI is same-origin, and
+        # `X-ANS-Admin-Key` callers are server-side.
+        "allow_credentials": False,
         "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Authorization", "Content-Type", "X-ANS-Admin-Key"],
     }
@@ -110,7 +118,21 @@ def warn_if_cors_allowlist_empty(s) -> None:
         )
 
 
+def warn_if_cors_wildcards_inert(s) -> None:
+    """TRUS-2474: only ``https://*.<domain>`` compiles to a regex, so any other
+    ``*`` entry is a literal that never matches. That fails closed silently;
+    log it so a typo is visible."""
+    inert = s.cors_inert_wildcards
+    if inert:
+        logger.error(
+            "ANS_CORS_ORIGINS has wildcard entries that match nothing "
+            "(only https://*.<domain> is supported): %s",
+            ", ".join(inert),
+        )
+
+
 warn_if_cors_allowlist_empty(settings)
+warn_if_cors_wildcards_inert(settings)
 app.add_middleware(CORSMiddleware, **cors_middleware_kwargs(settings))
 
 

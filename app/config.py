@@ -137,6 +137,24 @@ class Settings(BaseSettings):
             for b in bases
         )
 
+    @property
+    def cors_inert_wildcards(self) -> list[str]:
+        """Entries holding a ``*`` that match nothing (TRUS-2474).
+
+        Only ``https://*.<base>`` is compiled into a regex. An ``http://*.`` or
+        bare ``*.`` entry stays a literal in ``allow_origins``, so it never
+        equals an Origin header and fails closed without a word. Surfaced at
+        startup so a typo is visible.
+        """
+        raw = self.ans_cors_origins.strip()
+        if raw == "*":
+            return []
+        return [
+            o
+            for o in _split_origins(raw)
+            if "*" in o and not o.startswith(_WILDCARD_PREFIX)
+        ]
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

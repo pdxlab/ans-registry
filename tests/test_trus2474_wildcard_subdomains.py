@@ -19,7 +19,11 @@ import re
 import pytest
 
 from app.config import Settings
-from app.main import cors_middleware_kwargs, warn_if_cors_allowlist_empty
+from app.main import (
+    cors_middleware_kwargs,
+    warn_if_cors_allowlist_empty,
+    warn_if_cors_wildcards_inert,
+)
 from tests.test_trus2473_prod_cors import (
     PROD_ORIGIN,
     _client,
@@ -72,7 +76,6 @@ def test_tenant_subdomains_pass_preflight(monkeypatch, origin):
     r = _preflight(_client(s), origin)
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] == origin
-    assert r.headers["access-control-allow-credentials"] == "true"
 
 
 def test_exact_entries_still_work_alongside_the_wildcard(monkeypatch):
@@ -154,3 +157,66 @@ def test_prod_workflow_value_allows_a_tenant_host(monkeypatch):
     r = _preflight(_client(s), "https://acme.trustmodel.ai")
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] == "https://acme.trustmodel.ai"
+
+
+# ── Credentials stay off ────────────────────────────────────────────────────
+
+def test_matched_tenant_origin_gets_no_credentials(monkeypatch):
+    """The wildcard must not extend *credentialed* CORS to sibling subdomains.
+
+    ANS admin authenticates with the ambient `ans_admin_session` cookie, and
+    SameSite=Lax does not stop a same-site request — every `*.trustmodel.ai`
+    host is the same site as ANS, so the browser attaches it. With credentials
+    echoed back, any tenant page could read `/admin/*` as the logged-in admin
+    (and follow `/admin/users/add`'s redirect, which carries a temp password in
+    the URL — TRUS-2475). Without the header the browser discards the response,
+    so a matched origin can read only what is already public.
+    """
+    s = _prod_settings(monkeypatch, BOTH)
+    r = _preflight(_client(s), "https://acme.trustmodel.ai")
+    assert r.status_code == 200
+    assert "access-control-allow-credentials" not in r.headers
+
+
+@pytest.mark.parametrize("value", [PROD_ORIGIN, WILDCARD, BOTH, "*", ""])
+def test_credentials_are_never_enabled(monkeypatch, value):
+    s = _prod_settings(monkeypatch, value)
+    assert cors_middleware_kwargs(s)["allow_credentials"] is False
+
+
+# ── Wildcard entries that match nothing ─────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://*.trustmodel.ai",   # https only
+        "*.trustmodel.ai",          # no scheme
+        "https://*trustmodel.ai",   # missing the dot
+    ],
+)
+def test_inert_wildcards_are_detected(monkeypatch, value):
+    s = _prod_settings(monkeypatch, value)
+    assert s.cors_origin_regex is None
+    assert s.cors_inert_wildcards == [value]
+
+
+def test_inert_wildcard_is_logged(monkeypatch, caplog):
+    s = _prod_settings(monkeypatch, f"{PROD_ORIGIN},http://*.trustmodel.ai")
+    with caplog.at_level(logging.ERROR):
+        warn_if_cors_wildcards_inert(s)
+    assert "match nothing" in caplog.text
+    assert "http://*.trustmodel.ai" in caplog.text
+
+
+def test_supported_wildcard_is_not_flagged(monkeypatch, caplog):
+    s = _prod_settings(monkeypatch, BOTH)
+    assert s.cors_inert_wildcards == []
+    with caplog.at_level(logging.ERROR):
+        warn_if_cors_wildcards_inert(s)
+    assert caplog.text == ""
+
+
+def test_bare_star_is_not_flagged_as_inert(monkeypatch):
+    """The bare "*" is the documented allow-all, not a typo."""
+    s = _prod_settings(monkeypatch, "*")
+    assert s.cors_inert_wildcards == []
