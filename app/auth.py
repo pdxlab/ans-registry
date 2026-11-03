@@ -16,6 +16,7 @@ import secrets
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Depends
 from passlib.context import CryptContext
@@ -34,6 +35,12 @@ _pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 # SHA-256 hex digest length, used to detect legacy `password_hash` rows.
 _LEGACY_SHA256_HEX_LEN = 64
+
+
+# The roles `AdminUser.role` may hold. `require_superadmin` keys off
+# "superadmin"; the admin UI renders the other two. Anything outside this set
+# silently behaves as a viewer, so it is rejected at the door (TRUS-2475).
+ADMIN_ROLES = ("superadmin", "admin", "viewer")
 
 
 class AdminUser(SQLModel, table=True):
@@ -192,6 +199,55 @@ def require_superadmin(request: Request, session: Session = Depends(get_session)
     if admin.role != "superadmin":
         raise HTTPException(status_code=403, detail="Superadmin access required.")
     return admin
+
+
+# ── CSRF: same-origin enforcement for admin form posts ──
+
+# Requests carrying this header authenticated programmatically. A browser never
+# attaches it on its own, and setting it cross-origin forces a preflight that
+# CORS rejects, so such requests cannot be driven from a victim's page.
+ADMIN_API_KEY_HEADER = "X-ANS-Admin-Key"
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """``scheme://host[:port]`` of `url`, or None if it has neither."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def require_same_origin(request: Request) -> None:
+    """Reject admin form posts that did not come from one of our own pages.
+
+    `ans_admin_session` is `SameSite=Lax`, and SameSite is decided per *site*:
+    every `*.trustmodel.ai` host is the same site as the registry, so the
+    browser attaches the cookie to a POST from any sibling subdomain. Form
+    posts are "simple" requests, so they are never preflighted and CORS never
+    sees them either. Comparing `Origin` against our own origin is what
+    actually stops it (TRUS-2475).
+
+    The expected origin comes from the request itself, so this follows whatever
+    host served the page — the custom domain, the container app's default
+    FQDN, or localhost in development — without another environment variable to
+    keep in sync.
+    """
+    if request.headers.get(ADMIN_API_KEY_HEADER):
+        return
+
+    expected = _origin_of(str(request.base_url))
+    stated = request.headers.get("origin") or _origin_of(
+        request.headers.get("referer", "")
+    )
+
+    # `expected` is None only if the request carried no usable host, which no
+    # real client does; rejecting keeps the unknown case closed.
+    if expected is None or stated != expected:
+        logger.warning(
+            "admin form post rejected: origin is not ours",
+            extra={"stated_origin": stated or "<none>", "expected_origin": expected},
+        )
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected.")
 
 
 # ── Seed the first superadmin ──
