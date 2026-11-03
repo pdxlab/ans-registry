@@ -87,6 +87,10 @@ jobs:
         # app.trustmodel.ai. `--replace-env-vars` also wipes any value set
         # by hand on the container app, so it must live here. Mirrors the
         # QA workflow, which pins its origins the same way.
+        #
+        # The https://*.trustmodel.ai entry allows tenant subdomain
+        # origins (TRUS-2474). It is a single-label wildcard compiled
+        # into allow_origin_regex, not the allow-all "*".
         run: |
           az containerapp update --name "$ACA_NAME" --resource-group "$RESOURCE_GROUP" \
             --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ steps.tag.outputs.tag }}" \
@@ -96,7 +100,7 @@ jobs:
               "WEB_WORKERS=2" \
               "ANS_RUN_AUTO_CREATE=0" \
               "ANS_SESSION_COOKIE_SECURE=true" \
-              "ANS_CORS_ORIGINS=https://app.trustmodel.ai" \
+              "ANS_CORS_ORIGINS=https://app.trustmodel.ai,https://*.trustmodel.ai" \
               "AURORA_GATEWAY_URL=${{ vars.AURORA_GATEWAY_URL_PROD }}" \
               "AGP_URL=${{ vars.AGP_URL_PROD }}" \
               "ANS_ADMIN_PASSWORD=secretref:ans-admin-password" \

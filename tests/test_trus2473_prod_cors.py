@@ -74,8 +74,10 @@ def test_prod_workflow_pins_cors_as_literal():
     assert PROD_ORIGIN in [o.strip() for o in value.split(",")]
 
 
-def test_prod_workflow_value_is_not_a_wildcard():
-    assert "*" not in _workflow_cors_value()
+def test_prod_workflow_value_is_not_allow_all():
+    """Subdomain wildcards are allowed as of TRUS-2474; the bare "*" is not,
+    because it opens the API to every origin."""
+    assert "*" not in [o.strip() for o in _workflow_cors_value().split(",")]
 
 
 def test_prod_workflow_value_passes_real_preflight(monkeypatch):
@@ -83,7 +85,9 @@ def test_prod_workflow_value_passes_real_preflight(monkeypatch):
     r = _preflight(_client(s), PROD_ORIGIN)
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] == PROD_ORIGIN
-    assert r.headers["access-control-allow-credentials"] == "true"
+    # Credentials are off as of TRUS-2474 — see the credentials section in
+    # tests/test_trus2474_wildcard_subdomains.py for why.
+    assert "access-control-allow-credentials" not in r.headers
 
 
 # ── Middleware behaviour ────────────────────────────────────────────────────

@@ -81,13 +81,25 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # for local dev convenience, but in QA/prod set the env var to a comma-
 # separated allowlist. allow_credentials is automatically off when "*" is
 # in the list, per FastAPI/CORS rules (cookies can't ride a wildcard).
+# An entry may also be a subdomain wildcard such as https://*.trustmodel.ai,
+# which Settings compiles into allow_origin_regex (TRUS-2474); Starlette
+# checks that regex first, then the exact list, so the two compose.
 def cors_middleware_kwargs(s) -> dict:
     """CORSMiddleware config for a Settings object. Shared with the tests so
     they exercise the exact config this app ships with."""
     origins = s.cors_origin_list
     return {
         "allow_origins": origins,
-        "allow_credentials": "*" not in origins,
+        "allow_origin_regex": s.cors_origin_regex,
+        # Credentials stay off (TRUS-2474). ANS admin authenticates with the
+        # ambient `ans_admin_session` cookie, and SameSite is decided per *site*
+        # — every `*.trustmodel.ai` host is the same site as ANS, so the browser
+        # attaches that cookie itself. Echoing a matched origin with credentials
+        # on would let any tenant subdomain read `/admin/*` as the logged-in
+        # admin. Nothing cross-origin needs them: the console's `ansClient` never
+        # sets `withCredentials`, the admin UI is same-origin, and
+        # `X-ANS-Admin-Key` callers are server-side.
+        "allow_credentials": False,
         "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Authorization", "Content-Type", "X-ANS-Admin-Key"],
     }
@@ -98,7 +110,7 @@ def warn_if_cors_allowlist_empty(s) -> None:
     stayed silent in Azure prod for weeks because ANS_CORS_ORIGINS was set to
     "" by the deploy. Server-to-server callers don't use CORS, so this logs
     rather than refusing to boot."""
-    if not s.is_development and not s.cors_origin_list:
+    if not s.is_development and not s.cors_origin_list and not s.cors_origin_regex:
         logger.error(
             "ANS_CORS_ORIGINS is empty in APP_ENV=%s: every browser "
             "cross-origin request will be rejected",
@@ -106,7 +118,21 @@ def warn_if_cors_allowlist_empty(s) -> None:
         )
 
 
+def warn_if_cors_wildcards_inert(s) -> None:
+    """TRUS-2474: only ``https://*.<domain>`` compiles to a regex, so any other
+    ``*`` entry is a literal that never matches. That fails closed silently;
+    log it so a typo is visible."""
+    inert = s.cors_inert_wildcards
+    if inert:
+        logger.error(
+            "ANS_CORS_ORIGINS has wildcard entries that match nothing "
+            "(only https://*.<domain> is supported): %s",
+            ", ".join(inert),
+        )
+
+
 warn_if_cors_allowlist_empty(settings)
+warn_if_cors_wildcards_inert(settings)
 app.add_middleware(CORSMiddleware, **cors_middleware_kwargs(settings))
 
 
