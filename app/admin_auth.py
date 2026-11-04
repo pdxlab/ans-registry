@@ -160,7 +160,7 @@ def admin_users(admin: AdminUser = Depends(require_superadmin), session: Session
         <form method="post" action="/admin/users/add" style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:end;">
             <div><label style="font-size:11px;color:#64748b;">Name</label><input type="text" name="name" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;" /></div>
             <div><label style="font-size:11px;color:#64748b;">Email</label><input type="email" name="email" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;" /></div>
-            <div><label style="font-size:11px;color:#64748b;">Role</label><select name="role" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;"><option value="admin">Admin</option><option value="viewer">Viewer</option></select></div>
+            <div><label style="font-size:11px;color:#64748b;">Role</label><select name="role" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;"><option value="admin">Admin</option></select></div>
             <button type="submit" class="btn btn-primary" style="height:36px;">Add Admin</button>
         </form>
         <p style="font-size:11px;color:#94a3b8;margin-top:8px;">New admin will receive a temporary password. They must change it on first login.</p>
@@ -225,4 +225,10 @@ def add_admin_user(
         <p style="margin-top:16px;"><a href="/admin/users">Back to Admin Users</a></p>
     </div>
     """
-    return admin_html(content, "users")
+    # This page body holds a live credential, so it must not be retained: the
+    # back button, a disk cache or any shared cache would surface it again
+    # after the superadmin has moved on (TRUS-2475 review).
+    return HTMLResponse(
+        admin_html(content, "users"),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )

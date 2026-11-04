@@ -35,7 +35,7 @@ from sqlmodel import Session, select
 
 from .admin import router as admin_router
 from .admin_auth import router as auth_router
-from .auth import seed_superadmin, AdminUser, require_admin
+from .auth import seed_superadmin, AdminUser, require_admin, require_same_origin
 from .config import settings
 from .database import create_db, get_session, engine
 from . import errors as errors_mod
@@ -716,6 +716,7 @@ def verify_agent(req: VerifyRequest, session: Session = Depends(get_session)):
 def org_validate_agent(
     req: OrgValidateRequest,
     admin: AdminUser = Depends(require_admin),
+    _: None = Depends(require_same_origin),
     session: Session = Depends(get_session),
 ):
     """
@@ -758,6 +759,7 @@ def org_validate_agent(
 def initiate_transfer(
     req: TransferRequest,
     admin: AdminUser = Depends(require_admin),
+    _: None = Depends(require_same_origin),
     session: Session = Depends(get_session),
 ):
     """
@@ -812,6 +814,7 @@ def initiate_transfer(
 def accept_transfer(
     req: TransferAcceptRequest,
     admin: AdminUser = Depends(require_admin),
+    _: None = Depends(require_same_origin),
     session: Session = Depends(get_session),
 ):
     """Accept an ownership transfer — new owner confirms. Admin only (TRUS-2006)."""
