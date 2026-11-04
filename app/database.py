@@ -48,7 +48,9 @@ _DATABASE_URL = _resolve_database_url()
 # pool_pre_ping=True validates connections from the pool before use — cheap
 # guard against stale Postgres connections after Cloud SQL maintenance.
 # For SQLite the kwarg is a harmless no-op.
-_engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}
+# hide_parameters (TRUS-2497): a failed statement's error text otherwise lists
+# its bound parameters, so a DB error during /ans/search logs the search term.
+_engine_kwargs: dict = {"echo": False, "pool_pre_ping": True, "hide_parameters": True}
 
 # SQLite needs `check_same_thread=False` to be used from FastAPI's
 # threadpool. psycopg/Postgres needs nothing extra.
