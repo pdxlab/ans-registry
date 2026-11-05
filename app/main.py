@@ -9,6 +9,7 @@ Endpoints:
   GET  /ans/whois/{name}     — WHOIS-for-agents record (owner/tier/cert status)
   POST /ans/verify           — Verify ownership via DNS or email
   POST /ans/verify/org       — Org-validate (OV tier) — admin only
+  POST /ans/verify/individual— Individual-validate (IV tier) — admin only
   POST /ans/a2a/verify       — Agent-to-agent verification
   GET  /ans/typosquats/{name}— Typosquat candidates targeting a name
   GET  /ans/orphans          — Orphaned / orphan-risk names
@@ -59,8 +60,12 @@ from .assurance import (
     compute_assurance_tier,
     assess_orphan_risk,
     find_typosquats,
+    CERTIFIED_TIERS,
+    METHOD_INDIVIDUAL,
     TIER_DV,
+    TIER_IV,
     TIER_OV,
+    TIER_RANK,
 )
 
 app = FastAPI(
@@ -192,10 +197,14 @@ class OrgValidateRequest(BaseModel):
     ans_name: str
 
 
+class IndividualValidateRequest(BaseModel):
+    ans_name: str
+
+
 class A2AVerifyRequest(BaseModel):
     target_ans_name: str  # the agent being verified
     caller_ans_name: str = ""  # the agent making the request (optional)
-    min_assurance: str = "DV"  # "unverified" | "DV" | "OV"
+    min_assurance: str = "DV"  # "unverified" | "IV" | "DV" | "OV"
 
 
 class VerifyRequest(BaseModel):
@@ -450,7 +459,7 @@ def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_
 
     # AgentCert status is derived from assurance tier + a current TrustScore cert.
     has_cert = agent.trust_score is not None and agent.trust_evaluated_at is not None
-    if agent.assurance_tier in (TIER_DV, TIER_OV) and has_cert:
+    if agent.assurance_tier in CERTIFIED_TIERS and has_cert:
         agentcert_status = f"certified ({agent.assurance_tier})"
     elif has_cert:
         agentcert_status = "scored (unverified)"
@@ -478,7 +487,7 @@ def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_
         # Admins can still see the address (app/admin.py, behind
         # get_current_admin) and it is unchanged at rest.
         "verified": agent.verified,
-        "assurance_tier": agent.assurance_tier,  # unverified | DV | OV
+        "assurance_tier": agent.assurance_tier,  # unverified | IV | DV | OV
         "verification_method": agent.verification_method if agent.verified else None,
         "registered_at": agent.registered_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
@@ -506,8 +515,9 @@ def a2a_verify(req: A2AVerifyRequest, request: Request, session: Session = Depen
     clear pass/fail plus the target's record and any typosquat warning.
     """
     target_name = req.target_ans_name.lower().strip()
-    tier_rank = {"unverified": 0, TIER_DV: 1, TIER_OV: 2}
-    required = tier_rank.get(req.min_assurance, 1)
+    tier_rank = TIER_RANK
+    # An unrecognised bar falls back to DV, as it always has.
+    required = tier_rank.get(req.min_assurance, TIER_RANK[TIER_DV])
 
     agent = session.exec(select(Agent).where(Agent.ans_name == target_name)).first()
 
@@ -729,7 +739,9 @@ def org_validate_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
 
-    if not agent.verified or agent.assurance_tier == "unverified":
+    # IV is verified too, but proves a person rather than a domain — OV still
+    # requires domain control (DV) first.
+    if not agent.verified or agent.assurance_tier not in (TIER_DV, TIER_OV):
         raise HTTPException(
             status_code=409,
             detail="Agent must be domain-verified (DV) before it can be org-validated (OV).",
@@ -751,6 +763,78 @@ def org_validate_agent(
         "assurance_tier": agent.assurance_tier,
         "org_validated_by": admin.email,
         "message": f"'{agent.ans_name}' promoted to OV — organization '{agent.owner_org}' confirmed.",
+    }
+
+
+@app.post("/ans/verify/individual")
+def individual_validate_agent(
+    req: IndividualValidateRequest,
+    admin: AdminUser = Depends(require_admin),
+    session: Session = Depends(get_session),
+):
+    """
+    Individual-validate an agent (IV tier) — TRUS-1678.
+
+    For a name registered by an individual's workspace org. The registrant's
+    identity is their email, verified by aurora-gateway, which calls this
+    right after a successful registration. Admin-gated: the public
+    /ans/register cannot grant a tier, so IV cannot be self-claimed.
+
+    IV never replaces a domain- or org-validated tier.
+    """
+    agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    if agent.verified and agent.assurance_tier == TIER_IV:
+        return {
+            "status": "already_individual_validated",
+            "ans_name": agent.ans_name,
+            "assurance_tier": agent.assurance_tier,
+            "verification_method": agent.verification_method,
+        }
+
+    if agent.verified:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent is already verified at {agent.assurance_tier}; IV would downgrade it.",
+        )
+
+    if agent.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent is {agent.status}; only an active agent can be individual-validated.",
+        )
+
+    agent.verified = True
+    agent.verification_method = METHOD_INDIVIDUAL
+    agent.verified_at = datetime.utcnow()
+    agent.assurance_tier = TIER_IV
+
+    # Same verified-owner TrustScore recalculation as /ans/verify.
+    score, tier = calculate_trust_score(
+        agent.agent_type, True, agent.capabilities, agent.source_url, agent.description
+    )
+    agent.trust_score = score
+    agent.trust_tier = tier
+    agent.trust_evaluated_at = datetime.utcnow()
+    agent.updated_at = datetime.utcnow()
+
+    session.add(agent)
+    session.commit()
+
+    logger.info(
+        "ANS individual validation granted",
+        extra={"admin_id": admin.id, "ans_name": agent.ans_name},
+    )
+
+    return {
+        "status": "individual_validated",
+        "ans_name": agent.ans_name,
+        "assurance_tier": agent.assurance_tier,
+        "verification_method": agent.verification_method,
+        "trust_score": score,
+        "trust_tier": tier,
     }
 
 
@@ -952,7 +1036,7 @@ def registry_stats(session: Session = Depends(get_session)):
         },
         "by_assurance": {
             t: len([a for a in all_agents if a.assurance_tier == t])
-            for t in ["unverified", "DV", "OV"]
+            for t in ["unverified", "IV", "DV", "OV"]
         },
     }
 
@@ -1017,7 +1101,7 @@ def list_directory(
     items = []
     for a in agents:
         # Mirror the WHOIS AgentCert-status derivation.
-        if a.assurance_tier in (TIER_DV, TIER_OV):
+        if a.assurance_tier in CERTIFIED_TIERS:
             agentcert_status = f"certified ({a.assurance_tier})"
         else:
             agentcert_status = "scored (unverified)"
