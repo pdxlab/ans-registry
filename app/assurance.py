@@ -19,12 +19,26 @@ from typing import Optional
 # ── Assurance tiers (TRUS-1257) ──
 
 TIER_UNVERIFIED = "unverified"
+TIER_IV = "IV"  # individual validated (TRUS-1678)
 TIER_DV = "DV"  # domain validated
 TIER_OV = "OV"  # organization validated
 
 # Methods that prove domain control and therefore earn at least DV.
 # TRUS-2286: "email" is not one; a matching email domain proves nothing.
 DOMAIN_CONTROL_METHODS = {"dns_txt"}
+
+# IV is granted by the gateway for an individual's workspace org, whose
+# identity is the user's gateway-verified email — not domain control. It is
+# only ever set through the admin-gated POST /ans/verify/individual, never
+# from anything a registrant sends to the public /ans/register.
+METHOD_INDIVIDUAL = "individual"
+
+# Ordering for "meets a minimum assurance bar" checks. IV proves a person,
+# not a domain, so it ranks below DV and never satisfies a DV/OV bar.
+TIER_RANK = {TIER_UNVERIFIED: 0, TIER_IV: 1, TIER_DV: 2, TIER_OV: 3}
+
+# Tiers that back an AgentCert ("certified (<tier>)") once a TrustScore exists.
+CERTIFIED_TIERS = (TIER_IV, TIER_DV, TIER_OV)
 
 
 def compute_assurance_tier(verified: bool, verification_method: str,

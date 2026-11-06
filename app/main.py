@@ -9,6 +9,7 @@ Endpoints:
   GET  /ans/whois/{name}     — WHOIS-for-agents record (owner/tier/cert status)
   POST /ans/verify           — Verify ownership via a DNS TXT record
   POST /ans/verify/org       — Org-validate (OV tier) — admin only
+  POST /ans/verify/individual— Individual-validate (IV tier) — admin only
   POST /ans/a2a/verify       — Agent-to-agent verification
   GET  /ans/typosquats/{name}— Typosquat candidates targeting a name
   GET  /ans/orphans          — Orphaned / orphan-risk names
@@ -26,7 +27,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -58,8 +59,12 @@ from .assurance import (
     compute_assurance_tier,
     assess_orphan_risk,
     find_typosquats,
+    CERTIFIED_TIERS,
+    METHOD_INDIVIDUAL,
     TIER_DV,
+    TIER_IV,
     TIER_OV,
+    TIER_RANK,
 )
 
 app = FastAPI(
@@ -80,15 +85,59 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # for local dev convenience, but in QA/prod set the env var to a comma-
 # separated allowlist. allow_credentials is automatically off when "*" is
 # in the list, per FastAPI/CORS rules (cookies can't ride a wildcard).
-_cors_origins = settings.cors_origin_list
-_cors_allow_credentials = "*" not in _cors_origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=_cors_allow_credentials,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-ANS-Admin-Key"],
-)
+# An entry may also be a subdomain wildcard such as https://*.trustmodel.ai,
+# which Settings compiles into allow_origin_regex (TRUS-2474); Starlette
+# checks that regex first, then the exact list, so the two compose.
+def cors_middleware_kwargs(s) -> dict:
+    """CORSMiddleware config for a Settings object. Shared with the tests so
+    they exercise the exact config this app ships with."""
+    origins = s.cors_origin_list
+    return {
+        "allow_origins": origins,
+        "allow_origin_regex": s.cors_origin_regex,
+        # Credentials stay off (TRUS-2474). ANS admin authenticates with the
+        # ambient `ans_admin_session` cookie, and SameSite is decided per *site*
+        # — every `*.trustmodel.ai` host is the same site as ANS, so the browser
+        # attaches that cookie itself. Echoing a matched origin with credentials
+        # on would let any tenant subdomain read `/admin/*` as the logged-in
+        # admin. Nothing cross-origin needs them: the console's `ansClient` never
+        # sets `withCredentials`, the admin UI is same-origin, and
+        # `X-ANS-Admin-Key` callers are server-side.
+        "allow_credentials": False,
+        "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type", "X-ANS-Admin-Key"],
+    }
+
+
+def warn_if_cors_allowlist_empty(s) -> None:
+    """TRUS-2473: an empty allowlist rejects every browser preflight, and it
+    stayed silent in Azure prod for weeks because ANS_CORS_ORIGINS was set to
+    "" by the deploy. Server-to-server callers don't use CORS, so this logs
+    rather than refusing to boot."""
+    if not s.is_development and not s.cors_origin_list and not s.cors_origin_regex:
+        logger.error(
+            "ANS_CORS_ORIGINS is empty in APP_ENV=%s: every browser "
+            "cross-origin request will be rejected",
+            s.app_env,
+        )
+
+
+def warn_if_cors_wildcards_inert(s) -> None:
+    """TRUS-2474: only ``https://*.<domain>`` compiles to a regex, so any other
+    ``*`` entry is a literal that never matches. That fails closed silently;
+    log it so a typo is visible."""
+    inert = s.cors_inert_wildcards
+    if inert:
+        logger.error(
+            "ANS_CORS_ORIGINS has wildcard entries that match nothing "
+            "(only https://*.<domain> is supported): %s",
+            ", ".join(inert),
+        )
+
+
+warn_if_cors_allowlist_empty(settings)
+warn_if_cors_wildcards_inert(settings)
+app.add_middleware(CORSMiddleware, **cors_middleware_kwargs(settings))
 
 
 # Request-id middleware + exception handlers must be installed before any
@@ -147,10 +196,14 @@ class OrgValidateRequest(BaseModel):
     ans_name: str
 
 
+class IndividualValidateRequest(BaseModel):
+    ans_name: str
+
+
 class A2AVerifyRequest(BaseModel):
     target_ans_name: str  # the agent being verified
     caller_ans_name: str = ""  # the agent making the request (optional)
-    min_assurance: str = "DV"  # "unverified" | "DV" | "OV"
+    min_assurance: str = "DV"  # "unverified" | "IV" | "DV" | "OV"
 
 
 class VerifyRequest(BaseModel):
@@ -193,6 +246,15 @@ class DirectoryResponse(BaseModel):
     limit: int
     offset: int
     items: list[DirectoryItem]
+
+
+# TRUS-2541 — cap matches aurora-gateway's Trust Index page limit (200), so one
+# list page is always one call.
+MAX_ASSURANCE_BATCH = 200
+
+
+class AssuranceBatchRequest(BaseModel):
+    names: list[str] = Field(max_length=MAX_ASSURANCE_BATCH)
 
 
 # ── Validation ──
@@ -404,7 +466,7 @@ def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_
 
     # AgentCert status is derived from assurance tier + a current TrustScore cert.
     has_cert = agent.trust_score is not None and agent.trust_evaluated_at is not None
-    if agent.assurance_tier in (TIER_DV, TIER_OV) and has_cert:
+    if agent.assurance_tier in CERTIFIED_TIERS and has_cert:
         agentcert_status = f"certified ({agent.assurance_tier})"
     elif has_cert:
         agentcert_status = "scored (unverified)"
@@ -432,7 +494,7 @@ def whois_agent(ans_name: str, request: Request, session: Session = Depends(get_
         # Admins can still see the address (app/admin.py, behind
         # get_current_admin) and it is unchanged at rest.
         "verified": agent.verified,
-        "assurance_tier": agent.assurance_tier,  # unverified | DV | OV
+        "assurance_tier": agent.assurance_tier,  # unverified | IV | DV | OV
         "verification_method": agent.verification_method if agent.verified else None,
         "registered_at": agent.registered_at.isoformat(),
         "updated_at": agent.updated_at.isoformat(),
@@ -460,8 +522,9 @@ def a2a_verify(req: A2AVerifyRequest, request: Request, session: Session = Depen
     clear pass/fail plus the target's record and any typosquat warning.
     """
     target_name = req.target_ans_name.lower().strip()
-    tier_rank = {"unverified": 0, TIER_DV: 1, TIER_OV: 2}
-    required = tier_rank.get(req.min_assurance, 1)
+    tier_rank = TIER_RANK
+    # An unrecognised bar falls back to DV, as it always has.
+    required = tier_rank.get(req.min_assurance, TIER_RANK[TIER_DV])
 
     agent = session.exec(select(Agent).where(Agent.ans_name == target_name)).first()
 
@@ -701,7 +764,9 @@ def org_validate_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
 
-    if not agent.verified or agent.assurance_tier == "unverified":
+    # IV is verified too, but proves a person rather than a domain — OV still
+    # requires domain control (DV) first.
+    if not agent.verified or agent.assurance_tier not in (TIER_DV, TIER_OV):
         raise HTTPException(
             status_code=409,
             detail="Agent must be domain-verified (DV) before it can be org-validated (OV).",
@@ -733,6 +798,78 @@ def org_validate_agent(
         "assurance_tier": agent.assurance_tier,
         "org_validated_by": admin.email,
         "message": f"'{agent.ans_name}' promoted to OV — organization '{agent.owner_org}' confirmed.",
+    }
+
+
+@app.post("/ans/verify/individual")
+def individual_validate_agent(
+    req: IndividualValidateRequest,
+    admin: AdminUser = Depends(require_admin),
+    session: Session = Depends(get_session),
+):
+    """
+    Individual-validate an agent (IV tier) — TRUS-1678.
+
+    For a name registered by an individual's workspace org. The registrant's
+    identity is their email, verified by aurora-gateway, which calls this
+    right after a successful registration. Admin-gated: the public
+    /ans/register cannot grant a tier, so IV cannot be self-claimed.
+
+    IV never replaces a domain- or org-validated tier.
+    """
+    agent = session.exec(select(Agent).where(Agent.ans_name == req.ans_name.lower())).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    if agent.verified and agent.assurance_tier == TIER_IV:
+        return {
+            "status": "already_individual_validated",
+            "ans_name": agent.ans_name,
+            "assurance_tier": agent.assurance_tier,
+            "verification_method": agent.verification_method,
+        }
+
+    if agent.verified:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent is already verified at {agent.assurance_tier}; IV would downgrade it.",
+        )
+
+    if agent.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent is {agent.status}; only an active agent can be individual-validated.",
+        )
+
+    agent.verified = True
+    agent.verification_method = METHOD_INDIVIDUAL
+    agent.verified_at = datetime.utcnow()
+    agent.assurance_tier = TIER_IV
+
+    # Same verified-owner TrustScore recalculation as /ans/verify.
+    score, tier = calculate_trust_score(
+        agent.agent_type, True, agent.capabilities, agent.source_url, agent.description
+    )
+    agent.trust_score = score
+    agent.trust_tier = tier
+    agent.trust_evaluated_at = datetime.utcnow()
+    agent.updated_at = datetime.utcnow()
+
+    session.add(agent)
+    session.commit()
+
+    logger.info(
+        "ANS individual validation granted",
+        extra={"admin_id": admin.id, "ans_name": agent.ans_name},
+    )
+
+    return {
+        "status": "individual_validated",
+        "ans_name": agent.ans_name,
+        "assurance_tier": agent.assurance_tier,
+        "verification_method": agent.verification_method,
+        "trust_score": score,
+        "trust_tier": tier,
     }
 
 
@@ -911,6 +1048,33 @@ def search_agents(
     }
 
 
+@app.post("/ans/assurance")
+def batch_assurance(req: AssuranceBatchRequest, session: Session = Depends(get_session)):
+    """
+    assurance_tier for many names in one call — TRUS-2541.
+
+    aurora-gateway's Trust Index (the console ANS list) has no copy of the
+    registry's tier, so it asks here once per list page. /ans/whois answers one
+    name per call and logs every lookup, which is wrong for a list.
+
+    Public, no auth: the tier is already public via /ans/whois. Returns only
+    the tier, never owner identity. Unknown and non-active names are omitted,
+    so a revoked or suspended name never shows a tier badge. No LookupLog
+    write — this is a directory render, not a lookup. POST only because up to
+    200 names don't fit comfortably in a query string.
+    """
+    names = {n.lower().strip() for n in req.names if n and n.strip()}
+    if not names:
+        return {"tiers": {}}
+    rows = session.exec(
+        select(Agent.ans_name, Agent.assurance_tier).where(
+            Agent.ans_name.in_(names),
+            Agent.status == "active",
+        )
+    ).all()
+    return {"tiers": {ans_name: tier for ans_name, tier in rows}}
+
+
 @app.get("/ans/stats")
 def registry_stats(session: Session = Depends(get_session)):
     """Public registry statistics."""
@@ -934,7 +1098,7 @@ def registry_stats(session: Session = Depends(get_session)):
         },
         "by_assurance": {
             t: len([a for a in all_agents if a.assurance_tier == t])
-            for t in ["unverified", "DV", "OV"]
+            for t in ["unverified", "IV", "DV", "OV"]
         },
     }
 
@@ -999,7 +1163,7 @@ def list_directory(
     items = []
     for a in agents:
         # Mirror the WHOIS AgentCert-status derivation.
-        if a.assurance_tier in (TIER_DV, TIER_OV):
+        if a.assurance_tier in CERTIFIED_TIERS:
             agentcert_status = f"certified ({a.assurance_tier})"
         else:
             agentcert_status = "scored (unverified)"
