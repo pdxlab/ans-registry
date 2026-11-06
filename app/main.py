@@ -27,7 +27,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -246,6 +246,15 @@ class DirectoryResponse(BaseModel):
     limit: int
     offset: int
     items: list[DirectoryItem]
+
+
+# TRUS-2541 — cap matches aurora-gateway's Trust Index page limit (200), so one
+# list page is always one call.
+MAX_ASSURANCE_BATCH = 200
+
+
+class AssuranceBatchRequest(BaseModel):
+    names: list[str] = Field(max_length=MAX_ASSURANCE_BATCH)
 
 
 # ── Validation ──
@@ -1011,6 +1020,33 @@ def search_agents(
             for a in agents
         ],
     }
+
+
+@app.post("/ans/assurance")
+def batch_assurance(req: AssuranceBatchRequest, session: Session = Depends(get_session)):
+    """
+    assurance_tier for many names in one call — TRUS-2541.
+
+    aurora-gateway's Trust Index (the console ANS list) has no copy of the
+    registry's tier, so it asks here once per list page. /ans/whois answers one
+    name per call and logs every lookup, which is wrong for a list.
+
+    Public, no auth: the tier is already public via /ans/whois. Returns only
+    the tier, never owner identity. Unknown and non-active names are omitted,
+    so a revoked or suspended name never shows a tier badge. No LookupLog
+    write — this is a directory render, not a lookup. POST only because up to
+    200 names don't fit comfortably in a query string.
+    """
+    names = {n.lower().strip() for n in req.names if n and n.strip()}
+    if not names:
+        return {"tiers": {}}
+    rows = session.exec(
+        select(Agent.ans_name, Agent.assurance_tier).where(
+            Agent.ans_name.in_(names),
+            Agent.status == "active",
+        )
+    ).all()
+    return {"tiers": {ans_name: tier for ans_name, tier in rows}}
 
 
 @app.get("/ans/stats")
