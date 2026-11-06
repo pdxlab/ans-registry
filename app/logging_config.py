@@ -76,6 +76,21 @@ class GcpJsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class DropQueryString(logging.Filter):
+    """TRUS-2497: uvicorn's access line carries the path with its query string
+    (``/ans/search?q=...``), and search terms can name a person. Keep the path.
+
+    uvicorn 0.32 logs ``'%s - "%s %s HTTP/%s" %d'`` with args
+    ``(client, method, path_with_query, http_version, status)``.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            record.args = (args[0], args[1], args[2].split("?", 1)[0], args[3], args[4])
+        return True
+
+
 def configure_logging() -> None:
     """Install the JSON formatter on the root logger.
 
@@ -90,6 +105,11 @@ def configure_logging() -> None:
             "formatters": {
                 "gcp_json": {
                     "()": GcpJsonFormatter,
+                },
+            },
+            "filters": {
+                "drop_query_string": {
+                    "()": DropQueryString,
                 },
             },
             "handlers": {
@@ -109,7 +129,8 @@ def configure_logging() -> None:
             "loggers": {
                 "uvicorn":        {"level": level, "handlers": ["stdout"], "propagate": False},
                 "uvicorn.error":  {"level": level, "handlers": ["stdout"], "propagate": False},
-                "uvicorn.access": {"level": level, "handlers": ["stdout"], "propagate": False},
+                "uvicorn.access": {"level": level, "handlers": ["stdout"], "propagate": False,
+                                   "filters": ["drop_query_string"]},
             },
         }
     )
