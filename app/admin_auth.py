@@ -2,7 +2,9 @@
 Admin auth routes — login, logout, manage admins.
 """
 
-from fastapi import APIRouter, Depends, Request, Form
+import html
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session, select
 
@@ -10,6 +12,7 @@ from .config import settings
 from .database import get_session
 from .models import Agent
 from .auth import (
+    ADMIN_ROLES,
     AdminUser,
     hash_password,
     upgrade_hash_if_legacy,
@@ -17,6 +20,7 @@ from .auth import (
     create_session,
     get_current_admin,
     require_admin,
+    require_same_origin,
     require_superadmin,
     SESSION_COOKIE,
     seed_superadmin,
@@ -73,6 +77,7 @@ def login_submit(
     email: str = Form(...),
     password: str = Form(...),
     session: Session = Depends(get_session),
+    _: None = Depends(require_same_origin),
 ):
     """Process login."""
     admin = session.exec(select(AdminUser).where(AdminUser.email == email.lower())).first()
@@ -155,7 +160,7 @@ def admin_users(admin: AdminUser = Depends(require_superadmin), session: Session
         <form method="post" action="/admin/users/add" style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:end;">
             <div><label style="font-size:11px;color:#64748b;">Name</label><input type="text" name="name" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;" /></div>
             <div><label style="font-size:11px;color:#64748b;">Email</label><input type="email" name="email" required style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;" /></div>
-            <div><label style="font-size:11px;color:#64748b;">Role</label><select name="role" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;"><option value="admin">Admin</option><option value="viewer">Viewer</option></select></div>
+            <div><label style="font-size:11px;color:#64748b;">Role</label><select name="role" style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:4px;font-size:13px;"><option value="admin">Admin</option></select></div>
             <button type="submit" class="btn btn-primary" style="height:36px;">Add Admin</button>
         </form>
         <p style="font-size:11px;color:#94a3b8;margin-top:8px;">New admin will receive a temporary password. They must change it on first login.</p>
@@ -165,16 +170,20 @@ def admin_users(admin: AdminUser = Depends(require_superadmin), session: Session
     return admin_html(content, "users")
 
 
-@router.post("/admin/users/add")
+@router.post("/admin/users/add", response_class=HTMLResponse)
 def add_admin_user(
     name: str = Form(...),
     email: str = Form(...),
     role: str = Form("admin"),
     admin: AdminUser = Depends(require_superadmin),
     session: Session = Depends(get_session),
+    _: None = Depends(require_same_origin),
 ):
     """Add a new admin user — superadmin only."""
     import secrets as sec
+
+    if role not in ADMIN_ROLES:
+        raise HTTPException(status_code=400, detail="Unknown role.")
 
     existing = session.exec(select(AdminUser).where(AdminUser.email == email.lower())).first()
     if existing:
@@ -193,5 +202,33 @@ def add_admin_user(
     session.add(new_admin)
     session.commit()
 
-    # In production, email the temp password. For now, show it in redirect.
-    return RedirectResponse(f"/admin/users?added={email}&temp_pw={temp_password}", status_code=302)
+    # The password is rendered here and nowhere else. It used to ride back on
+    # a redirect as `?temp_pw=`, which put a live credential into browser
+    # history, the `Referer` header and every proxy log that records full URLs
+    # (TRUS-2475). Only the hash is stored, so this page is the one chance to
+    # read it.
+    content = f"""
+    <div class="card">
+        <h2>Admin Added</h2>
+        <p style="font-size:13px;color:#64748b;">
+            {html.escape(new_admin.name)} &lt;{html.escape(new_admin.email)}&gt;
+            &middot; {html.escape(new_admin.role)}
+        </p>
+        <p style="font-size:13px;margin-top:16px;">Temporary password — shown once:</p>
+        <code style="display:inline-block;background:#f1f5f9;border:1px solid #e2e8f0;
+                     border-radius:6px;padding:10px 14px;font-size:15px;
+                     letter-spacing:1px;">{html.escape(temp_password)}</code>
+        <p style="font-size:11px;color:#94a3b8;margin-top:8px;">
+            Pass it to them over a channel you trust. It is not recoverable from
+            this page once you navigate away.
+        </p>
+        <p style="margin-top:16px;"><a href="/admin/users">Back to Admin Users</a></p>
+    </div>
+    """
+    # This page body holds a live credential, so it must not be retained: the
+    # back button, a disk cache or any shared cache would surface it again
+    # after the superadmin has moved on (TRUS-2475 review).
+    return HTMLResponse(
+        admin_html(content, "users"),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )

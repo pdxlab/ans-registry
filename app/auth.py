@@ -16,6 +16,7 @@ import secrets
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Depends
 from passlib.context import CryptContext
@@ -34,6 +35,20 @@ _pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 # SHA-256 hex digest length, used to detect legacy `password_hash` rows.
 _LEGACY_SHA256_HEX_LEN = 64
+
+
+# The roles `AdminUser.role` may hold. `require_superadmin` keys off
+# "superadmin"; everything else is an ordinary admin. Anything outside this set
+# is rejected at the door (TRUS-2475).
+#
+# "viewer" is deliberately absent. The model's comment advertises it, but no
+# code path ever reads `role` to deny a write — `require_admin` checks only
+# that *some* admin is authenticated — so a "viewer" row had the same power as
+# an admin while reading as read-only. Prod held no viewer rows when this was
+# checked (2026-11-04; one admin row in total), so the role is removed rather
+# than left as a label that promises a restriction nobody enforces. Enforcing
+# `role` properly is TRUS-2494.
+ADMIN_ROLES = ("superadmin", "admin")
 
 
 class AdminUser(SQLModel, table=True):
@@ -192,6 +207,91 @@ def require_superadmin(request: Request, session: Session = Depends(get_session)
     if admin.role != "superadmin":
         raise HTTPException(status_code=403, detail="Superadmin access required.")
     return admin
+
+
+# ── CSRF: same-origin enforcement for admin writes ──
+
+ADMIN_API_KEY_HEADER = "X-ANS-Admin-Key"
+
+# `Origin` and `Referer` are attacker-controlled, and `/admin/login` is
+# unauthenticated, so a rejected request writes a value of someone else's
+# choosing into the log. Cap and sanitise it.
+_MAX_LOGGED_ORIGIN = 128
+
+
+def _origin_of(url: str) -> Optional[str]:
+    """``scheme://host[:port]`` of `url`, or None if it has neither."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _safe_for_log(value: Optional[str]) -> str:
+    """Printable, length-capped rendering of an attacker-controlled header."""
+    if not value:
+        return "<none>"
+    cleaned = "".join(ch for ch in value if ch.isprintable())
+    if len(cleaned) > _MAX_LOGGED_ORIGIN:
+        cleaned = cleaned[:_MAX_LOGGED_ORIGIN] + "...[truncated]"
+    return cleaned or "<unprintable>"
+
+
+def require_same_origin(
+    request: Request, session: Session = Depends(get_session)
+) -> None:
+    """Reject cookie-driven admin writes that did not come from our own pages.
+
+    `ans_admin_session` is `SameSite=Lax`, and SameSite is decided per *site*:
+    every `*.trustmodel.ai` host is the same site as the registry, so the
+    browser attaches the cookie to a POST from any sibling subdomain.
+
+    This covers the JSON admin routes as well as the HTML forms. Both are
+    reachable without a preflight. A form post is a "simple" request by
+    definition; a JSON route is reachable because FastAPI parses a body with
+    *no* `Content-Type` as JSON, and `fetch` sends no `Content-Type` for a
+    `BufferSource` body — so there is nothing for CORS to intercept. A body
+    with a *wrong* `Content-Type` is rejected with 422, which is a different
+    case and the one the ticket originally measured (TRUS-2475 review).
+
+    The expected origin comes from the request itself, so this follows whatever
+    host served the page — the custom domain, the container app's default
+    FQDN, or localhost in development — without another environment variable to
+    keep in sync.
+    """
+    # A caller holding a *valid* admin key is not browser-driven: a browser
+    # never attaches this header on its own, and a page that sets it
+    # cross-origin triggers a preflight it cannot satisfy. The key has to
+    # actually resolve. `get_current_admin` falls back to the session cookie
+    # when it does not, so exempting on the header's mere presence would let
+    # any junk value turn a cookie-authenticated cross-origin write into an
+    # exempt one (TRUS-2475 review).
+    api_key = request.headers.get(ADMIN_API_KEY_HEADER, "")
+    if api_key:
+        caller = session.exec(
+            select(AdminUser).where(
+                AdminUser.api_key == api_key, AdminUser.is_active == True
+            )
+        ).first()
+        if caller:
+            return
+
+    expected = _origin_of(str(request.base_url))
+    stated = request.headers.get("origin") or _origin_of(
+        request.headers.get("referer", "")
+    )
+
+    # `expected` is None only if the request carried no usable host, which no
+    # real client does; rejecting keeps the unknown case closed.
+    if expected is None or stated != expected:
+        logger.warning(
+            "admin write rejected: origin is not ours",
+            extra={
+                "stated_origin": _safe_for_log(stated),
+                "expected_origin": expected,
+            },
+        )
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected.")
 
 
 # ── Seed the first superadmin ──

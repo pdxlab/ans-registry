@@ -167,10 +167,12 @@ def test_matched_tenant_origin_gets_no_credentials(monkeypatch):
     ANS admin authenticates with the ambient `ans_admin_session` cookie, and
     SameSite=Lax does not stop a same-site request — every `*.trustmodel.ai`
     host is the same site as ANS, so the browser attaches it. With credentials
-    echoed back, any tenant page could read `/admin/*` as the logged-in admin
-    (and follow `/admin/users/add`'s redirect, which carries a temp password in
-    the URL — TRUS-2475). Without the header the browser discards the response,
-    so a matched origin can read only what is already public.
+    echoed back, any tenant page could read `/admin/*` as the logged-in admin.
+    Without the header the browser discards the response, so a matched origin
+    can read only what is already public.
+
+    The admin writes themselves are now blocked by `require_same_origin`
+    (TRUS-2475); this stays as the other half of the defence.
     """
     s = _prod_settings(monkeypatch, BOTH)
     r = _preflight(_client(s), "https://acme.trustmodel.ai")
