@@ -13,7 +13,7 @@ nothing but the tier returned, and the 200-name cap.
 from sqlmodel import select
 
 from app.models import Agent, LookupLog
-from tests.conftest import register, verify_email
+from tests.conftest import register, verify_owner
 
 
 def _assurance(client, names):
@@ -23,8 +23,8 @@ def _assurance(client, names):
 def test_returns_each_names_stored_tier(client, admin_key):
     for name in ("acme-unverified", "acme-iv", "acme-dv", "acme-ov"):
         register(client, name)
-    verify_email(client, "acme-dv")
-    verify_email(client, "acme-ov")
+    verify_owner(client, "acme-dv")
+    verify_owner(client, "acme-ov")
     headers = {"X-ANS-Admin-Key": admin_key}
     client.post("/ans/verify/org", json={"ans_name": "acme-ov"}, headers=headers)
     client.post("/ans/verify/individual", json={"ans_name": "acme-iv"}, headers=headers)
@@ -46,7 +46,7 @@ def test_returns_each_names_stored_tier(client, admin_key):
 
 def test_agrees_with_whois(client, admin_key):
     register(client, "acme-ov")
-    verify_email(client, "acme-ov")
+    verify_owner(client, "acme-ov")
     client.post(
         "/ans/verify/org",
         json={"ans_name": "acme-ov"},

@@ -11,7 +11,7 @@ take any name. Both routes now require an admin (API key or session).
 from sqlmodel import select
 
 from app.models import Agent, Transfer
-from tests.conftest import register
+from tests.conftest import register, verify_owner
 
 OWNER = "ai@acme.com"
 ATTACKER = "evil@bad.example"
@@ -76,7 +76,7 @@ def test_anonymous_accept_refused_and_ownership_unchanged(client, session, admin
 
 def test_admin_transfer_happy_path_resets_verification(client, session, admin_key):
     register(client, "acme-sales-agent", owner_email=OWNER)
-    client.post("/ans/verify", json={"ans_name": "acme-sales-agent", "method": "email"})
+    verify_owner(client, "acme-sales-agent")
     headers = {"X-ANS-Admin-Key": admin_key}
 
     init = client.post("/ans/transfer", json=_transfer_body(to_email="ai@newco.example"), headers=headers)
