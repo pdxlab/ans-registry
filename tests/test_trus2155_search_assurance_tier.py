@@ -6,10 +6,10 @@ returns the stored `assurance_tier`, the same value /ans/lookup reports.
 
 Also pinned here, as the ticket asks: search and lookup agree on `verified`
 (the divergence this ticket was first filed against), an unverified name stays
-unverified, and email verification still refuses a cross-domain claim.
+unverified, and an email claim earns nothing (TRUS-2286).
 """
 
-from tests.conftest import register, verify_email
+from tests.conftest import register, verify_owner
 
 
 def _search(client, **params):
@@ -22,8 +22,8 @@ def test_search_returns_each_names_true_tier(client, admin_key):
     register(client, "acme-unverified")
     register(client, "acme-dv")
     register(client, "acme-ov")
-    verify_email(client, "acme-dv")
-    verify_email(client, "acme-ov")
+    verify_owner(client, "acme-dv")
+    verify_owner(client, "acme-ov")
     promoted = client.post(
         "/ans/verify/org",
         json={"ans_name": "acme-ov"},
@@ -41,8 +41,8 @@ def test_search_returns_each_names_true_tier(client, admin_key):
 def test_search_and_lookup_agree(client, admin_key):
     for name in ("acme-unverified", "acme-dv", "acme-ov"):
         register(client, name)
-    verify_email(client, "acme-dv")
-    verify_email(client, "acme-ov")
+    verify_owner(client, "acme-dv")
+    verify_owner(client, "acme-ov")
     client.post(
         "/ans/verify/org",
         json={"ans_name": "acme-ov"},
@@ -88,10 +88,10 @@ def test_unverified_name_stays_unverified_and_uncounted(client):
 def test_cross_domain_email_claim_is_refused(client):
     register(client, "acme-agent", owner_email="someone@other.com", owner_domain="acme.com")
 
-    resp = verify_email(client, "acme-agent")
+    resp = client.post("/ans/verify", json={"ans_name": "acme-agent", "method": "email"})
 
     assert resp.status_code == 200  # failures are 200 + status (see ticket)
-    assert resp.json()["status"] == "email_mismatch"
+    assert resp.json()["status"] == "email_not_accepted"  # TRUS-2286
     assert "assurance_tier" not in resp.json()
     row = _search(client)["acme-agent"]
     assert row["verified"] is False

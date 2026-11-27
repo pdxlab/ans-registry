@@ -71,6 +71,23 @@ def register(client, ans_name, owner_email="ai@acme.com", owner_org="Acme Inc.",
     return resp
 
 
-def verify_email(client, ans_name):
-    """Helper: verify an agent via email-domain match (earns DV)."""
-    return client.post("/ans/verify", json={"ans_name": ans_name, "method": "email"})
+def verify_owner(client, ans_name):
+    """Helper: verify an agent the only way that earns DV, a DNS TXT record
+    (TRUS-2286). The DNS lookup is stubbed to find the record."""
+    from unittest.mock import patch
+
+    with patch("app.main.check_dns_txt", return_value=True):
+        return client.post("/ans/verify", json={"ans_name": ans_name, "method": "dns_txt"})
+
+
+def verified_by_email_before(session, ans_name, assurance_tier="DV"):
+    """Helper: mark a registered agent as verified by a matching email domain,
+    as names were before TRUS-2286. /ans/verify can't do this any more."""
+    from sqlmodel import select
+
+    from app.models import Agent
+
+    agent = session.exec(select(Agent).where(Agent.ans_name == ans_name)).one()
+    agent.verified, agent.verification_method, agent.assurance_tier = True, "email", assurance_tier
+    session.add(agent)
+    session.commit()

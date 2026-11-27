@@ -9,7 +9,7 @@ IV ranks below DV: it never satisfies a DV/OV bar and is not a route to OV.
 from sqlmodel import select
 
 from app.models import Agent
-from tests.conftest import register, verify_email
+from tests.conftest import register, verify_owner
 
 IV_URL = "/ans/verify/individual"
 
@@ -113,7 +113,7 @@ def test_register_ignores_iv_claim_in_body(client, session):
 
 def test_iv_does_not_downgrade_dv(client, session, admin_key):
     register(client, "acme-agent")
-    verify_email(client, "acme-agent")
+    verify_owner(client, "acme-agent")
 
     resp = _promote(client, "acme-agent", admin_key)
 
@@ -123,7 +123,7 @@ def test_iv_does_not_downgrade_dv(client, session, admin_key):
 
 def test_iv_does_not_downgrade_ov(client, session, admin_key):
     register(client, "acme-agent")
-    verify_email(client, "acme-agent")
+    verify_owner(client, "acme-agent")
     client.post(
         "/ans/verify/org", json={"ans_name": "acme-agent"}, headers={"X-ANS-Admin-Key": admin_key}
     )
@@ -163,7 +163,7 @@ def test_verify_on_iv_name_reports_iv(client, admin_key):
     register(client, "sophia-agent")
     _promote(client, "sophia-agent", admin_key)
 
-    body = verify_email(client, "sophia-agent").json()
+    body = verify_owner(client, "sophia-agent").json()
 
     assert body["status"] == "already_verified"
     assert body["assurance_tier"] == "IV"
@@ -235,7 +235,7 @@ def test_a2a_unknown_bar_still_means_dv(client, admin_key):
     register(client, "sophia-agent")
     _promote(client, "sophia-agent", admin_key)
     register(client, "acme-agent")
-    verify_email(client, "acme-agent")
+    verify_owner(client, "acme-agent")
 
     assert _a2a(client, "sophia-agent", "bogus")["verified"] is False
     assert _a2a(client, "acme-agent", "bogus")["verified"] is True
@@ -243,7 +243,7 @@ def test_a2a_unknown_bar_still_means_dv(client, admin_key):
 
 def test_a2a_dv_and_ov_unchanged(client, admin_key):
     register(client, "acme-agent")
-    verify_email(client, "acme-agent")
+    verify_owner(client, "acme-agent")
 
     assert _a2a(client, "acme-agent", "IV")["verified"] is True
     assert _a2a(client, "acme-agent", "DV")["verified"] is True

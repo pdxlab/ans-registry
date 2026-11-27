@@ -25,7 +25,12 @@ def test_unverified_when_not_verified():
 
 def test_dv_on_domain_control():
     assert compute_assurance_tier(True, "dns_txt", False) == TIER_DV
-    assert compute_assurance_tier(True, "email", False) == TIER_DV
+
+
+def test_email_is_not_domain_control():
+    # TRUS-2286: a matching email domain proves nothing, with or without OV.
+    assert compute_assurance_tier(True, "email", False) == TIER_UNVERIFIED
+    assert compute_assurance_tier(True, "email", True) == TIER_UNVERIFIED
 
 
 def test_ov_requires_org_validation_on_top_of_dv():
